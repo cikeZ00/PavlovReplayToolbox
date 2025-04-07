@@ -10,7 +10,6 @@ use std::{
     thread,
 };
 
-use chrono::prelude::*;
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{run_native, App, CreationContext, NativeOptions};
 use serde::Deserialize;
@@ -18,6 +17,37 @@ use serde::Deserialize;
 use build_meta::build_meta;
 use build_replay::build_replay;
 
+use reqwest::blocking::Client;
+use std::time::Duration;
+
+
+#[derive(Debug, Clone)]
+struct ReplayItem {
+    id: String,
+    game_mode: String,
+    map_name: String,
+    created_date: String,
+    total_time: i32,
+    version: i32,
+    competitive: bool,
+    workshop_mods: String,
+    live: bool,
+}
+
+#[derive(Default, Clone)]
+struct ReplayFilters {
+    game_mode: String,
+    map_name: String,
+    workshop_mods: String,
+}
+
+#[derive(Clone, Default)]
+struct ReplayListState {
+    replays: Vec<ReplayItem>,
+    current_page: usize,
+    total_pages: usize,
+    filters: ReplayFilters,
+}
 
 struct Config {
     update_callback: Box<dyn Fn(Progress) + Send + Sync>,
@@ -333,10 +363,11 @@ struct ReplayApp {
     selected_path: Option<PathBuf>,
     show_completion_dialog: bool,
     current_page: Page,
+    replay_list: ReplayListState,
 }
 
 impl ReplayApp {
-    fn new(_: &CreationContext<'_>) -> Self {
+    fn new(cc: &CreationContext<'_>) -> Self {
         Self {
             progress: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new("Idle".to_string())),
@@ -344,7 +375,69 @@ impl ReplayApp {
             selected_path: None,
             show_completion_dialog: false,
             current_page: Page::Main,
+            replay_list: ReplayListState::default(),
         }
+    }
+
+    fn refresh_replays(&mut self) {
+        // TODO: Load replays from storage/API
+    }
+
+    fn render_replay_list(&mut self, ui: &mut egui::Ui) {
+        // Filters
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Game Mode:");
+                ui.text_edit_singleline(&mut self.replay_list.filters.game_mode);
+                ui.label("Map:");
+                ui.text_edit_singleline(&mut self.replay_list.filters.map_name);
+                ui.label("Workshop Mods:");
+                ui.text_edit_singleline(&mut self.replay_list.filters.workshop_mods);
+            });
+        });
+
+        // Replay list
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                for replay in &self.replay_list.replays {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.heading(&replay.map_name);
+                                ui.label(format!("Game Mode: {} | Date: {}", replay.game_mode, replay.created_date));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if self.styled_button(ui, "Process").clicked() {
+                                    // TODO: Process replay
+                                }
+                            });
+                        });
+                        ui.label(format!("Workshop Mods: {}", replay.workshop_mods));
+                        ui.label(format!("Total Time: {}s", replay.total_time));
+                    });
+                    ui.add_space(8.0);
+                }
+            });
+
+        // Pagination
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if self.styled_button(ui, "< Previous").clicked() && self.replay_list.current_page > 0 {
+                    self.replay_list.current_page -= 1;
+                    self.refresh_replays();
+                }
+                ui.label(format!("Page {} of {}",
+                                 self.replay_list.current_page + 1,
+                                 self.replay_list.total_pages.max(1)));
+                if self.styled_button(ui, "Next >").clicked() &&
+                    self.replay_list.current_page < self.replay_list.total_pages - 1 {
+                    self.replay_list.current_page += 1;
+                    self.refresh_replays();
+                }
+            });
+        });
     }
 
     fn reset_state(&mut self) {
@@ -479,17 +572,34 @@ impl ReplayApp {
         ui.horizontal(|ui| {
             ui.heading("Available Replays");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label("Page 1 of 1");
+                if self.styled_button(ui, "Refresh").clicked() {
+                    self.refresh_replays();
+                }
             });
         });
         ui.separator();
-
+    
+        // Filters at the top
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Game Mode:");
+                ui.add_sized([120.0, 24.0], 
+                    egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode));
+                ui.label("Map:");
+                ui.add_sized([120.0, 24.0], 
+                    egui::TextEdit::singleline(&mut self.replay_list.filters.map_name));
+                ui.label("Workshop Mods:");
+                ui.add_sized([120.0, 24.0], 
+                    egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods));
+            });
+        });
+    
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-
-                for i in 0..5 {
+    
+                for replay in &self.replay_list.replays {
                     egui::Frame::none()
                         .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
                         .show(ui, |ui| {
@@ -499,30 +609,45 @@ impl ReplayApp {
                                     ui.horizontal(|ui| {
                                         ui.set_min_width(ui.available_width() - 150.0);
                                         ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(format!("Replay #{}", i))
+                                            ui.label(egui::RichText::new(&replay.map_name)
                                                 .strong()
                                                 .size(16.0));
-                                            ui.label("Game Mode: TDM | Map: DataCenter | Date: 2024-03-20");
+                                            ui.label(format!(
+                                                "Game Mode: {} | Date: {}", 
+                                                replay.game_mode, 
+                                                replay.created_date
+                                            ));
+                                            ui.label(format!("Workshop Mods: {}", replay.workshop_mods));
+                                            ui.label(format!("Total Time: {}s", replay.total_time));
                                         });
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if self.styled_button(ui, "Download & Process").clicked() {
-                                                // TODO: Implement online replay processing
+                                                // TODO: Handle replay processing
                                             }
                                         });
                                     });
                                 });
                         });
                 }
-
+    
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if self.styled_button(ui, "< Previous").clicked() {
-                            // TODO: Implement pagination
+                        if self.styled_button(ui, "< Previous").clicked() 
+                            && self.replay_list.current_page > 0 
+                        {
+                            self.replay_list.current_page -= 1;
+                            self.refresh_replays();
                         }
-                        ui.label("Page 1");
-                        if self.styled_button(ui, "Next >").clicked() {
-                            // TODO: Implement pagination
+                        ui.label(format!("Page {} of {}", 
+                            self.replay_list.current_page + 1,
+                            self.replay_list.total_pages.max(1)
+                        ));
+                        if self.styled_button(ui, "Next >").clicked() 
+                            && self.replay_list.current_page < self.replay_list.total_pages - 1 
+                        {
+                            self.replay_list.current_page += 1;
+                            self.refresh_replays();
                         }
                     });
                 });

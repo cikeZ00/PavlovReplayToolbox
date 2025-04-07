@@ -11,7 +11,7 @@ pub fn build_meta(meta: &MetaData) -> Result<Vec<u8>, Box<dyn Error>> {
 
     buf.write_int32(0x1CA2E27F)?;
     buf.write_int32(6)?;
-    buf.write_int32(meta.totalTime)?;
+    buf.write_int32(meta.total_time)?;
     buf.write_int32(meta.version)?;
     buf.write_int32(0)?;
     buf.write_int32(-257)?;
@@ -19,10 +19,10 @@ pub fn build_meta(meta: &MetaData) -> Result<Vec<u8>, Box<dyn Error>> {
     let competitive_str = if meta.competitive { "competitive" } else { "casual" };
     let friendly_name_str = format!(
         "{},{},{},0,{},{}",
-        meta.gameMode, meta.friendlyName, competitive_str, meta.workshop_mods, meta.live
+        meta.game_mode, meta.friendly_name, competitive_str, meta.workshop_mods, meta.live
     );
 
-    let mut name_bytes: Vec<u8> = friendly_name_str
+    let name_bytes: Vec<u8> = friendly_name_str
         .encode_utf16()
         .flat_map(|u| u.to_le_bytes())
         .collect();
