@@ -20,7 +20,31 @@ use build_replay::build_replay;
 
 use reqwest::blocking::Client;
 use std::time::Duration;
+use std::collections::{HashMap, HashSet};
 
+const API_BASE_URL: &str = "https://tv.vankrupt.net";
+
+#[derive(Deserialize)]
+struct ApiResponse {
+    replays: Vec<ApiReplay>,
+    total: i32,
+}
+
+#[derive(Deserialize)]
+struct ApiReplay {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(rename = "gameMode")]
+    game_mode: String,
+    #[serde(rename = "friendlyName")]
+    map_name: String,
+    created: String,
+    workshop_mods: String,
+    competitive: bool,
+    live: bool,
+    // New field: list of user IDs (as strings)
+    users: Option<Vec<String>>,
+}
 
 #[derive(Debug, Clone)]
 struct ReplayItem {
@@ -33,7 +57,10 @@ struct ReplayItem {
     competitive: bool,
     workshop_mods: String,
     live: bool,
+    // New field: list of user IDs. You might want to fill it from ApiReplay.users.
+    users: Vec<String>,
 }
+
 
 #[derive(Default, Clone)]
 struct ReplayFilters {
@@ -365,23 +392,105 @@ struct ReplayApp {
     show_completion_dialog: bool,
     current_page: Page,
     replay_list: ReplayListState,
+    profile_textures: HashMap<String, egui::TextureHandle>,
+    loading_profiles: HashSet<String>,
+    profile_tx: std::sync::mpsc::Sender<(String, egui::ColorImage)>,
+    profile_rx: std::sync::mpsc::Receiver<(String, egui::ColorImage)>,
 }
 
 impl ReplayApp {
     fn new(cc: &CreationContext<'_>) -> Self {
-        Self {
+        let (profile_tx, profile_rx) = std::sync::mpsc::channel();
+        let mut app = Self {
             progress: Arc::new(Mutex::new(None)),
-            status: Arc::new(Mutex::new("Idle".to_string())),
+            status: Arc::new(Mutex::new("Loading replays...".to_string())),
             is_processing: false,
             selected_path: None,
             show_completion_dialog: false,
             current_page: Page::Main,
             replay_list: ReplayListState::default(),
-        }
+            profile_textures: HashMap::new(),
+            loading_profiles: HashSet::new(),
+            profile_tx,
+            profile_rx,
+        };
+        app.refresh_replays();
+        app
     }
 
-    fn refresh_replays(&mut self) {
-        // TODO: Load replays from storage/API
+    fn load_profile(&mut self, user: String) {
+        self.loading_profiles.insert(user.clone());
+        let profile_tx = self.profile_tx.clone();
+        thread::spawn(move || {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Some(std::time::Duration::from_secs(10)))
+                .build()
+                .expect("Failed to build HTTP client");
+            let url = format!("http://prod.cdn.pavlov-vr.com/avatar/{}.png", user);
+            if let Ok(response) = client.get(&url).send() {
+                if let Ok(bytes) = response.bytes() {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let img = img.to_rgba8();
+                        let size = [img.width() as usize, img.height() as usize];
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
+                        let _ = profile_tx.send((user, color_image));
+                    }
+                }
+            }
+        });
+    }
+
+    fn fetch_replays(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
+
+        let offset = self.replay_list.current_page * 100;
+        let url = format!(
+            "{}/find/?game=all&offset={}&shack=true&live=false",
+            API_BASE_URL, offset
+        );
+
+        let response = client.get(&url).send()?.json::<ApiResponse>()?;
+        self.replay_list.total_pages = (response.total as f32 / 100.0).ceil() as usize;
+        self.replay_list.replays = response
+            .replays
+            .into_iter()
+            .map(|r| ReplayItem {
+                id: r.id,
+                game_mode: r.game_mode,
+                map_name: r.map_name,
+                created_date: r.created,
+                total_time: 0,
+                version: 0,
+                competitive: r.competitive,
+                workshop_mods: r.workshop_mods,
+                live: r.live,
+                // Use an empty vector if the API does not provide users.
+                // Otherwise, unwrap or default as needed.
+                users: r.users.unwrap_or_default(),
+            })
+            .collect();
+        Ok(())
+    }
+
+fn refresh_replays(&mut self) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = "Loading replays...".to_string();
+        }
+
+        match self.fetch_replays() {
+            Ok(_) => {
+                if let Ok(mut status) = self.status.lock() {
+                    *status = "Replays loaded successfully".to_string();
+                }
+            }
+            Err(e) => {
+                if let Ok(mut status) = self.status.lock() {
+                    *status = format!("Error loading replays: {}", e);
+                }
+            }
+        }
     }
 
     fn render_replay_list(&mut self, ui: &mut egui::Ui) {
@@ -493,6 +602,20 @@ impl ReplayApp {
 
 impl App for ReplayApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        while let Ok((user, color_image)) = self.profile_rx.try_recv() {
+            let texture_handle = ctx.load_texture(
+                &format!("avatar_{}", user),
+                color_image,
+                egui::TextureOptions {
+                    magnification: egui::TextureFilter::Linear,
+                    minification: egui::TextureFilter::Linear,
+                    ..Default::default()
+                },
+            );
+            self.profile_textures.insert(user.clone(), texture_handle);
+            self.loading_profiles.remove(&user);
+        }
+        
         // Process completion dialog (keep at top level)
         if self.show_completion_dialog {
             egui::Window::new("Processing Complete")
@@ -542,7 +665,7 @@ impl App for ReplayApp {
         // Main content area
         CentralPanel::default().show(ctx, |ui| {
             match self.current_page {
-                Page::Main => self.render_main_page(ui),
+                Page::Main => self.render_main_page(ui, ctx),
                 Page::ProcessLocal => self.render_process_page(ui),
             }
         });
@@ -569,7 +692,9 @@ impl ReplayApp {
         )
     }
 
-    fn render_main_page(&mut self, ui: &mut egui::Ui) {
+    // Note: The function signature now requires a &egui::Context reference
+    // so that we can set clipboard contents and access textures.
+    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("Available Replays");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -579,73 +704,49 @@ impl ReplayApp {
             });
         });
         ui.separator();
-    
+
         // Filters at the top
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label("Game Mode:");
-                ui.add_sized([120.0, 24.0], 
-                    egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode));
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode));
                 ui.label("Map:");
-                ui.add_sized([120.0, 24.0], 
-                    egui::TextEdit::singleline(&mut self.replay_list.filters.map_name));
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.map_name));
                 ui.label("Workshop Mods:");
-                ui.add_sized([120.0, 24.0], 
-                    egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods));
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods));
             });
         });
-    
+
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-    
-                for replay in &self.replay_list.replays {
-                    egui::Frame::none()
-                        .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
-                        .show(ui, |ui| {
-                            egui::Frame::group(ui.style())
-                                .fill(ui.style().visuals.extreme_bg_color)
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.set_min_width(ui.available_width() - 150.0);
-                                        ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(&replay.map_name)
-                                                .strong()
-                                                .size(16.0));
-                                            ui.label(format!(
-                                                "Game Mode: {} | Date: {}", 
-                                                replay.game_mode, 
-                                                replay.created_date
-                                            ));
-                                            ui.label(format!("Workshop Mods: {}", replay.workshop_mods));
-                                            ui.label(format!("Total Time: {}s", replay.total_time));
-                                        });
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if self.styled_button(ui, "Download & Process").clicked() {
-                                                // TODO: Handle replay processing
-                                            }
-                                        });
-                                    });
-                                });
-                        });
+
+                // Clone the replays to avoid borrow checker issues
+                let replays = self.replay_list.replays.clone();
+                for replay in &replays {
+                    self.render_replay_item(ui, ctx, replay);
                 }
-    
+
+                // Pagination controls
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if self.styled_button(ui, "< Previous").clicked() 
-                            && self.replay_list.current_page > 0 
+                        if self.styled_button(ui, "< Previous").clicked()
+                            && self.replay_list.current_page > 0
                         {
                             self.replay_list.current_page -= 1;
                             self.refresh_replays();
                         }
-                        ui.label(format!("Page {} of {}", 
-                            self.replay_list.current_page + 1,
-                            self.replay_list.total_pages.max(1)
+                        ui.label(format!("Page {} of {}",
+                                         self.replay_list.current_page + 1,
+                                         self.replay_list.total_pages.max(1)
                         ));
-                        if self.styled_button(ui, "Next >").clicked() 
-                            && self.replay_list.current_page < self.replay_list.total_pages - 1 
+                        if self.styled_button(ui, "Next >").clicked()
+                            && self.replay_list.current_page < self.replay_list.total_pages - 1
                         {
                             self.replay_list.current_page += 1;
                             self.refresh_replays();
@@ -653,6 +754,90 @@ impl ReplayApp {
                     });
                 });
             });
+    }
+
+    fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, replay: &ReplayItem) {
+        ui.push_id(replay.id.as_str(), |ui| {
+            egui::Frame::none()
+                .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
+                .show(ui, |ui| {
+                    egui::Frame::group(ui.style())
+                        .fill(ui.style().visuals.extreme_bg_color)
+                        .show(ui, |ui| {
+                            // Use vertical layout for the whole item
+                            ui.vertical(|ui| {
+                                // Top section with map name and button
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&replay.map_name)
+                                        .strong()
+                                        .size(16.0));
+                                    
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        self.styled_button(ui, "Download & Process");
+                                    });
+                                });
+    
+                                // Information section
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label("Game Mode:");
+                                    ui.label(&replay.game_mode);
+                                    ui.separator();
+                                    ui.label("Date:");
+                                    ui.label(&replay.created_date);
+                                });
+    
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label("Workshop Mods:");
+                                    ui.label(&replay.workshop_mods);
+                                });
+    
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label("Total Time:");
+                                    ui.label(format!("{}s", replay.total_time));
+                                });
+    
+                                ui.separator();
+    
+                                // User avatars section
+                                egui::ScrollArea::horizontal()
+                                    .id_source(format!("scroll_{}", replay.id))
+                                    .max_height(72.0)
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                            for (idx, user) in replay.users.iter().enumerate() {
+                                                ui.push_id(idx, |ui| {
+                                                    self.render_user_avatar(ui, ctx, user);
+                                                });
+                                            }
+                                        });
+                                    });
+                            });
+                        });
+                });
+        });
+    }
+
+    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, user: &str) {
+        if let Some(texture) = self.profile_textures.get(user) {
+            if ui.add_sized(egui::vec2(64.0, 64.0), egui::ImageButton::new(texture)).clicked() {
+                ctx.output_mut(|out| {
+                    out.copied_text = user.to_string();
+                });
+            }
+        } else {
+            if ui.add_sized(egui::vec2(64.0, 64.0), egui::Button::new("Loading")).clicked() {
+                ctx.output_mut(|out| {
+                    out.copied_text = user.to_string();
+                });
+            }
+            if !self.loading_profiles.contains(user) {
+                self.load_profile(user.to_string());
+            }
+        }
     }
 
     fn render_process_page(&mut self, ui: &mut egui::Ui) {
