@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 mod build_meta;
 mod build_replay;
 mod replay_buffer;
