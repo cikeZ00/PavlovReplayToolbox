@@ -26,6 +26,8 @@ pub struct Settings {
     pub download_dir: PathBuf,
     pub auto_refresh_enabled: bool,
     pub auto_refresh_interval_mins: u64,
+    pub auto_download_enabled: bool,
+    pub auto_download_trigger_user_id: String,
 }
 
 impl Default for Settings {
@@ -34,6 +36,8 @@ impl Default for Settings {
             download_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             auto_refresh_enabled: true,
             auto_refresh_interval_mins: 5,
+            auto_download_enabled: false,
+            auto_download_trigger_user_id: String::new(),
         }
     }
 }
@@ -196,6 +200,9 @@ impl ReplayApp {
                     *status = "Replays loaded successfully".to_string();
                 }
                 self.last_refresh_time = std::time::Instant::now();
+                
+                // Check for auto-download triggers after refreshing
+                self.check_auto_download_triggers();
             }
             Err(e) => {
                 if let Ok(mut status) = self.status.lock() {
@@ -205,6 +212,31 @@ impl ReplayApp {
         }
     }
     
+    fn check_auto_download_triggers(&mut self) {
+        if !self.settings.auto_download_enabled || 
+           self.settings.auto_download_trigger_user_id.is_empty() ||
+           self.is_downloading {
+            return;
+        }
+    
+        let trigger_user_id = self.settings.auto_download_trigger_user_id.to_lowercase();
+        
+        let replay_to_download = self.replay_list.replays.iter()
+            .find(|replay| {
+                !self.downloaded_replays.contains(&replay.id) && 
+                replay.users.iter().any(|user| user.to_lowercase().contains(&trigger_user_id))
+            })
+            .map(|replay| replay.id.clone());
+        
+        if let Some(replay_id) = replay_to_download {
+            if let Ok(mut status) = self.status.lock() {
+                *status = format!("Auto-downloading replay with user ID: {}", 
+                                 self.settings.auto_download_trigger_user_id);
+            }
+            
+            self.process_online_replay(&replay_id);
+        }
+    }
 
     fn reset_state(&mut self) {
         self.is_processing_local = false;
@@ -860,6 +892,28 @@ impl ReplayApp {
                 ui.label("Automatically refresh the replay list at the specified interval");
             });
         });
+
+        ui.add_space(16.0);
+
+        // Auto download settings
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("Auto Download");
+                
+                ui.checkbox(&mut self.settings.auto_download_enabled, "Enable auto download");
+                
+                ui.add_space(4.0);
+                ui.label("User ID trigger:");
+                ui.add_enabled(
+                    self.settings.auto_download_enabled,
+                    egui::TextEdit::singleline(&mut self.settings.auto_download_trigger_user_id)
+                        .hint_text("Enter user ID to auto-download")
+                );
+                
+                ui.add_space(4.0);
+                ui.label("Automatically download replays containing the specified user ID");
+            });
+        });
         
         // Apply button
         ui.horizontal(|ui| {
@@ -1017,12 +1071,15 @@ impl App for ReplayApp {
             self.is_downloading = false;
         }
 
-        // Check if it's time to auto-refresh
         if self.settings.auto_refresh_enabled && 
            self.last_refresh_time.elapsed() > Duration::from_secs(self.settings.auto_refresh_interval_mins * 60) &&
            self.current_page == Page::Main && 
            !self.is_downloading {
             self.refresh_replays();
+        } else if self.settings.auto_download_enabled &&
+                 !self.is_downloading && 
+                 self.current_page == Page::Main {
+            self.check_auto_download_triggers();
         }
         
         ctx.request_repaint_after(Duration::from_millis(32));
