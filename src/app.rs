@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
     collections::{HashMap, HashSet},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Serialize, Deserialize};
@@ -24,12 +24,16 @@ type DownloadedReplaysReceiver = std::sync::mpsc::Receiver<String>;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub download_dir: PathBuf,
+    pub auto_refresh_enabled: bool,
+    pub auto_refresh_interval_mins: u64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             download_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            auto_refresh_enabled: true,
+            auto_refresh_interval_mins: 5,
         }
     }
 }
@@ -90,6 +94,7 @@ pub struct ReplayApp {
     downloaded_tx: DownloadedReplaysSender,
     downloaded_rx: DownloadedReplaysReceiver,
     settings: Settings,
+    last_refresh_time: Instant,
 }
 
 impl ReplayApp {
@@ -118,6 +123,7 @@ impl ReplayApp {
             downloaded_tx,
             downloaded_rx,
             settings,
+            last_refresh_time: std::time::Instant::now(),
         };
         app.refresh_replays();
         app.check_downloaded_replays();
@@ -189,6 +195,7 @@ impl ReplayApp {
                 if let Ok(mut status) = self.status.lock() {
                     *status = "Replays loaded successfully".to_string();
                 }
+                self.last_refresh_time = std::time::Instant::now();
             }
             Err(e) => {
                 if let Ok(mut status) = self.status.lock() {
@@ -807,6 +814,7 @@ impl ReplayApp {
         
         ui.add_space(8.0);
         
+        // Download directory settings
         ui.group(|ui| {
             ui.vertical(|ui| {
                 ui.heading("Download Directory");
@@ -833,6 +841,25 @@ impl ReplayApp {
         });
         
         ui.add_space(16.0);
+        
+        // Auto refresh settings
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("Auto Refresh");
+                
+                ui.checkbox(&mut self.settings.auto_refresh_enabled, "Enable auto refresh");
+                
+                ui.add_enabled(
+                    self.settings.auto_refresh_enabled,
+                    egui::Slider::new(&mut self.settings.auto_refresh_interval_mins, 1..=60)
+                        .text("Refresh interval (minutes)")
+                        .clamp_to_range(true)
+                );
+                
+                ui.add_space(4.0);
+                ui.label("Automatically refresh the replay list at the specified interval");
+            });
+        });
         
         // Apply button
         ui.horizontal(|ui| {
@@ -990,6 +1017,14 @@ impl App for ReplayApp {
             self.is_downloading = false;
         }
 
+        // Check if it's time to auto-refresh
+        if self.settings.auto_refresh_enabled && 
+           self.last_refresh_time.elapsed() > Duration::from_secs(self.settings.auto_refresh_interval_mins * 60) &&
+           self.current_page == Page::Main && 
+           !self.is_downloading {
+            self.refresh_replays();
+        }
+        
         ctx.request_repaint_after(Duration::from_millis(32));
     }
 }
