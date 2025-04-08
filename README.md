@@ -1,3 +1,5 @@
+[![Download Latest Release](https://img.shields.io/badge/Download-Latest%20Release-brightgreen)](https://github.com/cikeZ00/PavlovReplayToolbox/releases/latest)
+
 # PavlovReplayToolbox
 
 PavlovReplayToolbox is a Rust-based toolbox designed to facilitate the download and processing of replay files within the Pavlov VR game. This toolbox provides utilities to download replays from PavlovTV and process them into full .replay files.
