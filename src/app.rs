@@ -457,30 +457,48 @@ impl ReplayApp {
                         self.render_replay_item(ui, ctx, replay);
                     }
                 }
-
-                // Pagination controls
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if self.styled_button(ui, "< Previous").clicked()
-                            && self.replay_list.current_page > 0
-                        {
-                            self.replay_list.current_page -= 1;
-                            self.refresh_replays();
-                        }
-                        ui.label(format!("Page {} of {}",
-                                         self.replay_list.current_page + 1,
-                                         self.replay_list.total_pages.max(1)
-                        ));
-                        if self.styled_button(ui, "Next >").clicked()
-                            && self.replay_list.current_page < self.replay_list.total_pages - 1
-                        {
-                            self.replay_list.current_page += 1;
-                            self.refresh_replays();
-                        }
-                    });
-                });
             });
+            
+        // Pagination controls as a floating panel in bottom right
+        if self.replay_list.total_pages > 0 {
+            // Create a floating pagination controls area
+            egui::Area::new("pagination_controls")
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(ctx.style().visuals.window_fill)
+                        .shadow(egui::epaint::Shadow::small_dark())
+                        .rounding(5.0)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(
+                                    self.replay_list.current_page > 0,
+                                    egui::Button::new("<")
+                                        .min_size(egui::vec2(32.0, 32.0))
+                                ).clicked() {
+                                    self.replay_list.current_page -= 1;
+                                    self.refresh_replays();
+                                }
+                                
+                                ui.label(format!("Page {} of {}",
+                                    self.replay_list.current_page + 1,
+                                    self.replay_list.total_pages.max(1)
+                                ));
+                                
+                                if ui.add_enabled(
+                                    self.replay_list.current_page < self.replay_list.total_pages - 1,
+                                    egui::Button::new(">")
+                                        .min_size(egui::vec2(32.0, 32.0))
+                                ).clicked() {
+                                    self.replay_list.current_page += 1;
+                                    self.refresh_replays();
+                                }
+                            });
+                        });
+                });
+        }
     }
 
     fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, replay: &ReplayItem) {
