@@ -26,8 +26,9 @@ fn main() -> eframe::Result<()> {
         default_theme: eframe::Theme::Dark,
         follow_system_theme: true,
         centered: true,
+        renderer: eframe::Renderer::Glow,
         vsync: true,
-        multisampling: 0,
+        multisampling: 4,
         ..Default::default()
     };
 

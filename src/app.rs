@@ -455,7 +455,7 @@ impl ReplayApp {
     
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label("Total Time:");
+                                    ui.label("Time Since:");
                                     ui.label(format!("{}s", replay.time_since));
                                 });
     
@@ -497,7 +497,6 @@ impl ReplayApp {
                 
                 if let Some(texture) = self.profile_textures.get(user) {
                     ui.centered_and_justified(|ui| {
-                        // Use a button with image rather than ImageButton for more consistent hover behavior
                         let btn_response = ui.add_sized(
                             avatar_size,
                             egui::Button::image_and_text(texture, "")
@@ -530,18 +529,16 @@ impl ReplayApp {
                     }
                 }
                 
-                // Draw highlight effect when hovering
+                // Border and hover effect
                 if let Some(resp) = response {
                     if resp.hovered() {
-                        // Draw a highlight border or overlay
                         let rect = resp.rect;
                         ui.painter().rect_stroke(
                             rect.expand(2.0), 
-                            4.0,  // Rounded corners
+                            4.0,
                             egui::Stroke::new(2.0, ui.style().visuals.selection.bg_fill)
                         );
                         
-                        // Add tooltip with username on hover
                         resp.on_hover_text(user);
                     }
                 }
@@ -715,11 +712,11 @@ impl App for ReplayApp {
             }
         }
         
-        // Check download status separately (if needed)
+        // Check download status separately
         if self.is_downloading && self.downloading_replay_id.is_none() {
             self.is_downloading = false;
         }
 
-        ctx.request_repaint_after(Duration::from_millis(100));
+        ctx.request_repaint_after(Duration::from_millis(32));
     }
 }
