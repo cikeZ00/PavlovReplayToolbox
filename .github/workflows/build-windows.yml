@@ -1,5 +1,8 @@
 name: Build Windows Production Binary
 
+permissions:
+  contents: write
+
 on:
   push:
     branches: [ master ]
@@ -28,3 +31,21 @@ jobs:
         with:
           name: PavlovReplayToolbox
           path: target/release/PavlovReplayToolbox.exe
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "v${{ github.run_number }}"
+          name: "Release v${{ github.run_number }}"
+          body: "Release generated from commit ${{ github.sha }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "v${{ github.run_number }}"
+          files: target/release/PavlovReplayToolbox.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
