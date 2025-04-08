@@ -1,13 +1,14 @@
 use std::{
     fs,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     collections::{HashMap, HashSet},
     time::Duration,
 };
 
+use serde::{Serialize, Deserialize};
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{App, CreationContext};
 use reqwest::blocking::Client;
@@ -19,6 +20,19 @@ use crate::tools::replay_processor::{
 
 type DownloadedReplaysSender = std::sync::mpsc::Sender<String>;
 type DownloadedReplaysReceiver = std::sync::mpsc::Receiver<String>;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Settings {
+    pub download_dir: PathBuf,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            download_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct ReplayFilters {
@@ -54,6 +68,7 @@ pub struct ReplayListState {
 pub enum Page {
     Main,
     ProcessLocal,
+    Settings,
 }
 
 pub struct ReplayApp {
@@ -74,12 +89,15 @@ pub struct ReplayApp {
     downloaded_replays: HashSet<String>,
     downloaded_tx: DownloadedReplaysSender,
     downloaded_rx: DownloadedReplaysReceiver,
+    settings: Settings,
 }
 
 impl ReplayApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
         let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
+
+        let settings = Self::load_settings().unwrap_or_default();
 
         let mut app = Self {
             progress: Arc::new(Mutex::new(None)),
@@ -99,6 +117,7 @@ impl ReplayApp {
             downloaded_replays: HashSet::new(),
             downloaded_tx,
             downloaded_rx,
+            settings,
         };
         app.refresh_replays();
         app.check_downloaded_replays();
@@ -238,6 +257,7 @@ impl ReplayApp {
         let status_clone = Arc::clone(&self.status);
         let progress_clone = Arc::clone(&self.download_progress);
         let downloaded_tx = self.downloaded_tx.clone();
+        let download_dir = self.settings.download_dir.clone();
 
         thread::spawn(move || {
             if let Ok(mut status) = status_clone.lock() {
@@ -311,7 +331,7 @@ impl ReplayApp {
                     formatted_date,
                     replay_id_clone
                 );
-                let output_path = std::env::current_dir()?.join(filename);
+                let output_path = download_dir.join(filename);
 
                 fs::write(output_path, replay_data)?;
 
@@ -780,6 +800,94 @@ impl ReplayApp {
                 }
             });
     }
+
+    fn render_settings_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.separator();
+        
+        ui.add_space(8.0);
+        
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.heading("Download Directory");
+                ui.horizontal(|ui| {
+                    let path_text = self.settings.download_dir.display().to_string();
+                    ui.label("Save replays to:");
+                    ui.add(egui::Label::new(path_text).wrap(true));
+                    
+                    if self.styled_button(ui, "Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.settings.download_dir = path;
+                            if let Err(err) = self.save_settings() {
+                                if let Ok(mut status) = self.status.lock() {
+                                    *status = format!("Error saving settings: {}", err);
+                                }
+                            }
+                        }
+                    }
+                });
+                
+                ui.add_space(4.0);
+                ui.label("This is where downloaded replays will be saved");
+            });
+        });
+        
+        ui.add_space(16.0);
+        
+        // Apply button
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                if self.styled_button(ui, "Apply").clicked() {
+                    if let Err(err) = self.save_settings() {
+                        if let Ok(mut status) = self.status.lock() {
+                            *status = format!("Error saving settings: {}", err);
+                        }
+                    } else {
+                        if let Ok(mut status) = self.status.lock() {
+                            *status = "Settings saved successfully".to_string();
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    fn load_settings() -> Result<Settings, Box<dyn std::error::Error>> {
+        let settings_dir = Self::get_settings_dir()?;
+        let settings_file = settings_dir.join("settings.json");
+        
+        if !settings_file.exists() {
+            return Ok(Settings::default());
+        }
+
+        let settings_str = fs::read_to_string(settings_file)?;
+        let settings = serde_json::from_str(&settings_str)?;
+        Ok(settings)
+    }
+
+    fn save_settings(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let settings_dir = Self::get_settings_dir()?;
+        fs::create_dir_all(&settings_dir)?;
+        
+        let settings_file = settings_dir.join("settings.json");
+        let settings_str = serde_json::to_string_pretty(&self.settings)?;
+        
+        fs::write(settings_file, settings_str)?;
+        Ok(())
+    }
+
+    fn get_settings_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let mut path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "PavlovVR", "ReplayToolbox") {
+            proj_dirs.config_dir().to_path_buf()
+        } else {
+            let mut path = std::env::current_dir()?;
+            path.push(".config");
+            path
+        };
+        
+        fs::create_dir_all(&path)?;
+        Ok(path)
+    }
 }
 
 impl App for ReplayApp {
@@ -843,6 +951,19 @@ impl App for ReplayApp {
                 ).clicked().then(|| {
                     self.current_page = Page::ProcessLocal;
                 });
+
+                // Add flexible space to push the Settings button to the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_sized(
+                        [80.0, button_height],
+                        egui::SelectableLabel::new(
+                            self.current_page == Page::Settings,
+                            "Settings"
+                        )
+                    ).clicked().then(|| {
+                        self.current_page = Page::Settings;
+                    });
+                });
             });
             ui.add_space(4.0);
             ui.separator();
@@ -852,6 +973,7 @@ impl App for ReplayApp {
             match self.current_page {
                 Page::Main => self.render_main_page(ui, ctx),
                 Page::ProcessLocal => self.render_process_page(ui),
+                Page::Settings => self.render_settings_page(ui),
             }
         });
 
