@@ -1,6 +1,6 @@
 # PavlovReplayToolbox
 
-PavlovReplayToolbox is a Rust-based toolbox designed to facilitate the download and processing of replay files within the Pavlov VR game. This toolbox provides utilities to download replays from LocalPavTV and process them into full .replay files.
+PavlovReplayToolbox is a Rust-based toolbox designed to facilitate the download and processing of replay files within the Pavlov VR game. This toolbox provides utilities to download replays from PavlovTV and process them into full .replay files.
 
 ## Features
 
