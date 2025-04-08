@@ -5,7 +5,6 @@ mod replay_buffer;
 
 use std::{
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -13,14 +12,51 @@ use std::{
 
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{run_native, App, CreationContext, NativeOptions};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use build_meta::build_meta;
 use build_replay::build_replay;
 
 use reqwest::blocking::Client;
 use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use chrono::DateTime;
 
+const API_BASE_URL: &str = "https://tv.vankrupt.net";
+
+#[derive(Debug, Clone, Default)]
+struct DownloadProgress {
+    download: ProgressUpdate,
+    build: ProgressUpdate,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ApiResponse {
+    replays: Vec<ApiReplay>,
+    total: i32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[derive(Clone)]
+struct ApiReplay {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(rename = "gameMode")]
+    game_mode: String,
+    #[serde(rename = "friendlyName")]
+    map_name: String,
+    shack: bool,
+    created: String,
+    expires: String,
+    #[serde(rename = "secondsSince")]
+    time_since: i32,
+    workshop_mods: String,
+    competitive: bool,
+    live: bool,
+    users: Option<Vec<String>>,
+    modcount: i32,
+}
 
 #[derive(Debug, Clone)]
 struct ReplayItem {
@@ -28,12 +64,15 @@ struct ReplayItem {
     game_mode: String,
     map_name: String,
     created_date: String,
-    total_time: i32,
-    version: i32,
+    time_since: i32,
     competitive: bool,
+    modcount: i32,
+    shack: bool,
     workshop_mods: String,
     live: bool,
+    users: Vec<String>,
 }
+
 
 #[derive(Default, Clone)]
 struct ReplayFilters {
@@ -93,7 +132,7 @@ impl ProgressUpdate {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Debug)]
 struct MetadataFile {
     meta: Option<MetaData>,
     #[serde(rename = "events_pavlov")]
@@ -101,7 +140,7 @@ struct MetadataFile {
     events: Option<EventsWrapper>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct MetaData {
     #[serde(rename = "gameMode")]
     pub game_mode: String,
@@ -117,12 +156,13 @@ pub struct MetaData {
     pub created: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
+#[derive(Debug)]
 struct EventsWrapper {
     events: Vec<Event>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 struct Event {
     id: Option<String>,
     group: Option<String>,
@@ -132,7 +172,7 @@ struct Event {
     data: Option<EventData>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 struct EventData {
     #[serde(rename = "type")]
     typ: Option<String>,
@@ -156,6 +196,165 @@ struct Chunk {
     group: Option<String>,
     metadata: Option<String>,
     size_in_bytes: Option<i32>,
+}
+
+fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    // Validate replay id (only accept alphanumeric IDs, similar to Python's isalnum check)
+    if !replay_id.chars().all(|c| c.is_alphanumeric()) {
+        return Err("Invalid replay id".into());
+    }
+
+    // Use the constant for API base URL
+    const SERVER: &str = API_BASE_URL;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+
+    // This will serve as our in-memory "dictionary" (like the Python replay_data)
+    let mut replay_data = serde_json::Map::new();
+    let mut offset = 0;
+    let mut find_all_response = None;
+
+    // Loop through available pages to find the matching replay.
+    while find_all_response.is_none() {
+        let find_all: ApiResponse = client
+            .get(&format!("{}/find/?game=all&offset={}&live=false", SERVER, offset))
+            .send()?
+            .json()?;
+
+        // Find the replay within the current response.
+        find_all_response = find_all
+            .replays
+            .iter()
+            .find(|r| r.id == replay_id)
+            .cloned();
+
+        if offset >= find_all.total as usize {
+            break;
+        }
+        offset += 100;
+    }
+
+    // Ensure we found the replay; otherwise return an error.
+    let replay_info = find_all_response.ok_or("Recording not available")?;
+    replay_data.insert("find".into(), serde_json::to_value(&replay_info)?);
+
+    // Start the download process
+    let start_download: serde_json::Value = client
+        .post(&format!("{}/replay/{}/startDownloading?user", SERVER, replay_id))
+        .send()?
+        .json()?;
+    replay_data.insert("start_downloading".into(), start_download.clone());
+
+    if start_download["state"] != "Recorded" {
+        return Err("Recording must be finished before download".into());
+    }
+
+    // Fetch metadata and event data
+    let meta: MetaData = client
+        .get(&format!("{}/meta/{}", SERVER, replay_id))
+        .send()?
+        .json()?;
+    replay_data.insert("meta".into(), serde_json::to_value(&meta)?);
+
+    let events: EventsWrapper = client
+        .get(&format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id))
+        .send()?
+        .json()?;
+    replay_data.insert("events".into(), serde_json::to_value(&events)?);
+
+    let events_pavlov: EventsWrapper = client
+        .get(&format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id))
+        .send()?
+        .json()?;
+    replay_data.insert("events_pavlov".into(), serde_json::to_value(&events_pavlov)?);
+
+    // Download the header, keeping the bytes in memory
+    let header_data = client
+        .get(&format!("{}/replay/{}/file/replay.header", SERVER, replay_id))
+        .send()?
+        .bytes()?
+        .to_vec();
+
+    let mut download_chunks = Vec::new();
+    download_chunks.push(Chunk {
+        data: header_data,
+        chunk_type: 0,
+        time1: None,
+        time2: None,
+        id: None,
+        group: None,
+        metadata: None,
+        size_in_bytes: None,
+    });
+
+    // Download stream chunks into memory and capture header timing info
+    let num_chunks = start_download["numChunks"].as_i64().unwrap_or(0) as usize;
+    for i in 0..num_chunks {
+        let response = client
+            .get(&format!("{}/replay/{}/file/stream.{}", SERVER, replay_id, i))
+            .send()?;
+
+        let time1 = response.headers()
+            .get("mtime1")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok());
+        let time2 = response.headers()
+            .get("mtime2")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok());
+
+        let chunk_data = response.bytes()?.to_vec();
+        download_chunks.push(Chunk {
+            data: chunk_data,
+            chunk_type: 1,
+            time1,
+            time2,
+            id: None,
+            group: None,
+            metadata: None,
+            size_in_bytes: None,
+        });
+    }
+
+    // Process events from both groups and add them as chunks.
+    for event in events.events {
+        if let Some(data) = event.data.and_then(|d| d.data) {
+            download_chunks.push(Chunk {
+                data,
+                chunk_type: 2,
+                time1: event.time1,
+                time2: event.time2,
+                id: event.id,
+                group: event.group,
+                metadata: event.meta,
+                size_in_bytes: None,
+            });
+        }
+    }
+
+    for event in events_pavlov.events {
+        if let Some(data) = event.data.and_then(|d| d.data) {
+            download_chunks.push(Chunk {
+                data,
+                chunk_type: 3,
+                time1: event.time1,
+                time2: event.time2,
+                id: event.id,
+                group: event.group,
+                metadata: event.meta,
+                size_in_bytes: None,
+            });
+        }
+    }
+
+    // Build the replay by first constructing the meta buffer and then appending each chunk.
+    let meta_buffer = build_meta(&meta)?;
+    let mut parts = vec![build_replay::ReplayPart::Meta(meta_buffer)];
+    parts.extend(download_chunks.into_iter().map(build_replay::ReplayPart::Chunk));
+
+    // Finally, build the replay and return its bytes—all in memory.
+    build_replay(&parts)
 }
 
 fn replay_chunks_dir() -> PathBuf {
@@ -346,7 +545,20 @@ fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn std::error:
     parts.extend(download_chunks.into_iter().map(build_replay::ReplayPart::Chunk));
 
     let replay = build_replay(&parts)?;
-    let output_path = std::env::current_dir()?.join("processed_replay.replay");
+    let created_datetime = DateTime::parse_from_rfc3339(&meta.created)
+        .or_else(|_| -> Result<_, Box<dyn Error>> {
+            let ts = meta.created
+                .parse::<i64>()
+                .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+            DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.fixed_offset())
+                .ok_or_else(|| "Invalid timestamp".into())
+        })?;
+
+    let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
+    let sanitized_name = meta.friendly_name.replace([' ', '/', '\\', ':'], "-");
+    let filename = format!("{}-{}-{}.replay", sanitized_name, meta.game_mode, formatted_date);
+    let output_path = std::env::current_dir()?.join(filename);
     fs::write(&output_path, &replay)?;
     Ok(replay)
 }
@@ -365,23 +577,108 @@ struct ReplayApp {
     show_completion_dialog: bool,
     current_page: Page,
     replay_list: ReplayListState,
+    profile_textures: HashMap<String, egui::TextureHandle>,
+    loading_profiles: HashSet<String>,
+    profile_tx: std::sync::mpsc::Sender<(String, egui::ColorImage)>,
+    profile_rx: std::sync::mpsc::Receiver<(String, egui::ColorImage)>,
+    download_progress: Arc<Mutex<Option<DownloadProgress>>>,
+    downloading_replay_id: Option<String>,
 }
 
 impl ReplayApp {
     fn new(cc: &CreationContext<'_>) -> Self {
-        Self {
+        let (profile_tx, profile_rx) = std::sync::mpsc::channel();
+        let mut app = Self {
             progress: Arc::new(Mutex::new(None)),
-            status: Arc::new(Mutex::new("Idle".to_string())),
+            status: Arc::new(Mutex::new("Loading replays...".to_string())),
             is_processing: false,
             selected_path: None,
             show_completion_dialog: false,
             current_page: Page::Main,
             replay_list: ReplayListState::default(),
-        }
+            profile_textures: HashMap::new(),
+            loading_profiles: HashSet::new(),
+            profile_tx,
+            profile_rx,
+            download_progress: Arc::new(Mutex::new(None)),
+            downloading_replay_id: None,
+        };
+        app.refresh_replays();
+        app
     }
 
-    fn refresh_replays(&mut self) {
-        // TODO: Load replays from storage/API
+    fn load_profile(&mut self, user: String) {
+        self.loading_profiles.insert(user.clone());
+        let profile_tx = self.profile_tx.clone();
+        thread::spawn(move || {
+            let client = Client::builder()
+                .timeout(Some(Duration::from_secs(10)))
+                .build()
+                .expect("Failed to build HTTP client");
+            let url = format!("http://prod.cdn.pavlov-vr.com/avatar/{}.png", user);
+            if let Ok(response) = client.get(&url).send() {
+                if let Ok(bytes) = response.bytes() {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let img = img.to_rgba8();
+                        let size = [img.width() as usize, img.height() as usize];
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
+                        let _ = profile_tx.send((user, color_image));
+                    }
+                }
+            }
+        });
+    }
+
+    fn fetch_replays(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
+
+        let offset = self.replay_list.current_page * 100;
+        let url = format!(
+            "{}/find/?game=all&offset={}&shack=true&live=false",
+            API_BASE_URL, offset
+        );
+
+        let response = client.get(&url).send()?.json::<ApiResponse>()?;
+        self.replay_list.total_pages = (response.total as f32 / 100.0).ceil() as usize;
+        self.replay_list.replays = response
+            .replays
+            .into_iter()
+            .map(|r| ReplayItem {
+                id: r.id,
+                game_mode: r.game_mode,
+                map_name: r.map_name,
+                created_date: r.created,
+                time_since: r.time_since,
+                shack: r.shack,
+                modcount: r.modcount,
+                competitive: r.competitive,
+                workshop_mods: r.workshop_mods,
+                live: r.live,
+                users: r.users.unwrap_or_default(),
+            })
+            .collect();
+        Ok(())
+    }
+
+fn refresh_replays(&mut self) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = "Loading replays...".to_string();
+        }
+
+        match self.fetch_replays() {
+            Ok(_) => {
+                if let Ok(mut status) = self.status.lock() {
+                    *status = "Replays loaded successfully".to_string();
+                }
+            }
+            Err(e) => {
+                if let Ok(mut status) = self.status.lock() {
+                    *status = format!("Error loading replays: {}", e);
+                }
+            }
+        }
     }
 
     fn render_replay_list(&mut self, ui: &mut egui::Ui) {
@@ -415,7 +712,7 @@ impl ReplayApp {
                             });
                         });
                         ui.label(format!("Workshop Mods: {}", replay.workshop_mods));
-                        ui.label(format!("Total Time: {}s", replay.total_time));
+                        ui.label(format!("Time Since: {}s", replay.time_since));
                     });
                     ui.add_space(8.0);
                 }
@@ -493,6 +790,22 @@ impl ReplayApp {
 
 impl App for ReplayApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.render_download_progress(ctx);
+        
+        while let Ok((user, color_image)) = self.profile_rx.try_recv() {
+            let texture_handle = ctx.load_texture(
+                &format!("avatar_{}", user),
+                color_image,
+                egui::TextureOptions {
+                    magnification: egui::TextureFilter::Linear,
+                    minification: egui::TextureFilter::Linear,
+                    ..Default::default()
+                },
+            );
+            self.profile_textures.insert(user.clone(), texture_handle);
+            self.loading_profiles.remove(&user);
+        }
+        
         // Process completion dialog (keep at top level)
         if self.show_completion_dialog {
             egui::Window::new("Processing Complete")
@@ -542,7 +855,7 @@ impl App for ReplayApp {
         // Main content area
         CentralPanel::default().show(ctx, |ui| {
             match self.current_page {
-                Page::Main => self.render_main_page(ui),
+                Page::Main => self.render_main_page(ui, ctx),
                 Page::ProcessLocal => self.render_process_page(ui),
             }
         });
@@ -557,11 +870,156 @@ impl App for ReplayApp {
             }
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
 
 impl ReplayApp {
+    fn process_online_replay(&mut self, replay_id: &str) {
+        self.is_processing = true;
+        self.downloading_replay_id = Some(replay_id.to_string());
+
+        let replay_id = replay_id.to_string();
+        let status_clone = Arc::clone(&self.status);
+        let progress_clone = Arc::clone(&self.download_progress);
+
+        thread::spawn(move || {
+            if let Ok(mut status) = status_clone.lock() {
+                *status = "Downloading replay...".to_string();
+            }
+
+            let client = Client::builder()
+                .build()
+                .unwrap();
+
+            let total_steps = 5;
+            let mut current_step = 0;
+
+            let update_progress = |current: usize, max: usize, is_build: bool| {
+                if let Ok(mut progress) = progress_clone.lock() {
+                    let progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
+                    if let Some(p) = progress.as_mut() {
+                        if is_build {
+                            p.build.current = current;
+                            p.build.max = max;
+                        } else {
+                            p.download.current = current;
+                            p.download.max = max;
+                        }
+                    }
+                }
+            };
+
+            if let Ok(mut progress) = progress_clone.lock() {
+                *progress = Some(DownloadProgress::default());
+            }
+
+            let result: Result<(), Box<dyn Error>> = (|| {
+                update_progress(current_step, total_steps, false);
+
+                for step in 0..total_steps {
+                    current_step = step;
+                    update_progress(current_step, total_steps, false);
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                let replay_data = download_replay(&replay_id)?;
+
+                update_progress(0, 100, true);
+                for i in 0..100 {
+                    thread::sleep(Duration::from_millis(10));
+                    update_progress(i + 1, 100, true);
+                }
+
+                // Fetch metadata
+                let metadata_result = client
+                    .get(&format!("{}/meta/{}", API_BASE_URL, replay_id))
+                    .send()?
+                    .json::<MetaData>()?;
+
+                let created_datetime = DateTime::parse_from_rfc3339(&metadata_result.created)
+                    .or_else(|_| -> Result<_, Box<dyn Error>> {
+                        let ts = metadata_result.created
+                            .parse::<i64>()
+                            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+                        DateTime::from_timestamp(ts, 0)
+                            .map(|dt| dt.fixed_offset())
+                            .ok_or_else(|| "Invalid timestamp".into())
+                    })?;
+
+                let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
+                let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
+                let filename = format!(
+                    "{}-{}-{}.replay",
+                    sanitized_name,
+                    metadata_result.game_mode,
+                    formatted_date
+                );
+                let output_path = std::env::current_dir()?.join(filename);
+
+                fs::write(output_path, replay_data)?;
+
+                if let Ok(mut status) = status_clone.lock() {
+                    *status = "Replay downloaded and processed successfully.".to_string();
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                if let Ok(mut status) = status_clone.lock() {
+                    *status = format!("Error: {}", e);
+                }
+            }
+
+            if let Ok(mut progress) = progress_clone.lock() {
+                *progress = None;
+            }
+        });
+    }
+
+
+    // Add this to the update() method after the completion dialog
+    fn render_download_progress(&mut self, ctx: &Context) {
+        if let Some(replay_id) = &self.downloading_replay_id {
+            if let Ok(progress) = self.download_progress.lock() {
+                if let Some(p) = &*progress {
+                    egui::Window::new("Downloading Replay")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                        .show(ctx, |ui| {
+                            ui.set_min_width(300.0);
+
+                            ui.label("Downloading components:");
+                            ui.add(egui::ProgressBar::new(
+                                p.download.progress())
+                                .show_percentage()
+                                .animate(true)
+                            );
+
+                            ui.add_space(8.0);
+                            ui.label("Building replay:");
+                            ui.add(egui::ProgressBar::new(
+                                p.build.progress())
+                                .show_percentage()
+                                .animate(true)
+                            );
+
+                            ui.add_space(8.0);
+                            if let Ok(status) = self.status.lock() {
+                                ui.label(&*status);
+                            }
+                        });
+                } else {
+                    self.downloading_replay_id = None;
+                }
+            }
+        }
+    }
+    
+    
+    
     fn styled_button(&self, ui: &mut egui::Ui, text: &str) -> egui::Response {
         ui.add_sized(
             [ui.available_width().min(120.0), 32.0],
@@ -569,7 +1027,9 @@ impl ReplayApp {
         )
     }
 
-    fn render_main_page(&mut self, ui: &mut egui::Ui) {
+    // Note: The function signature now requires a &egui::Context reference
+    // so that we can set clipboard contents and access textures.
+    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("Available Replays");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -579,73 +1039,49 @@ impl ReplayApp {
             });
         });
         ui.separator();
-    
+
         // Filters at the top
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label("Game Mode:");
-                ui.add_sized([120.0, 24.0], 
-                    egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode));
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode));
                 ui.label("Map:");
-                ui.add_sized([120.0, 24.0], 
-                    egui::TextEdit::singleline(&mut self.replay_list.filters.map_name));
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.map_name));
                 ui.label("Workshop Mods:");
-                ui.add_sized([120.0, 24.0], 
-                    egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods));
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods));
             });
         });
-    
+
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-    
-                for replay in &self.replay_list.replays {
-                    egui::Frame::none()
-                        .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
-                        .show(ui, |ui| {
-                            egui::Frame::group(ui.style())
-                                .fill(ui.style().visuals.extreme_bg_color)
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.set_min_width(ui.available_width() - 150.0);
-                                        ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(&replay.map_name)
-                                                .strong()
-                                                .size(16.0));
-                                            ui.label(format!(
-                                                "Game Mode: {} | Date: {}", 
-                                                replay.game_mode, 
-                                                replay.created_date
-                                            ));
-                                            ui.label(format!("Workshop Mods: {}", replay.workshop_mods));
-                                            ui.label(format!("Total Time: {}s", replay.total_time));
-                                        });
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if self.styled_button(ui, "Download & Process").clicked() {
-                                                // TODO: Handle replay processing
-                                            }
-                                        });
-                                    });
-                                });
-                        });
+
+                // Clone the replays to avoid borrow checker issues
+                let replays = self.replay_list.replays.clone();
+                for replay in &replays {
+                    self.render_replay_item(ui, ctx, replay);
                 }
-    
+
+                // Pagination controls
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if self.styled_button(ui, "< Previous").clicked() 
-                            && self.replay_list.current_page > 0 
+                        if self.styled_button(ui, "< Previous").clicked()
+                            && self.replay_list.current_page > 0
                         {
                             self.replay_list.current_page -= 1;
                             self.refresh_replays();
                         }
-                        ui.label(format!("Page {} of {}", 
-                            self.replay_list.current_page + 1,
-                            self.replay_list.total_pages.max(1)
+                        ui.label(format!("Page {} of {}",
+                                         self.replay_list.current_page + 1,
+                                         self.replay_list.total_pages.max(1)
                         ));
-                        if self.styled_button(ui, "Next >").clicked() 
-                            && self.replay_list.current_page < self.replay_list.total_pages - 1 
+                        if self.styled_button(ui, "Next >").clicked()
+                            && self.replay_list.current_page < self.replay_list.total_pages - 1
                         {
                             self.replay_list.current_page += 1;
                             self.refresh_replays();
@@ -653,6 +1089,95 @@ impl ReplayApp {
                     });
                 });
             });
+    }
+
+    fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, replay: &ReplayItem) {
+        ui.push_id(replay.id.as_str(), |ui| {
+            egui::Frame::none()
+                .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
+                .show(ui, |ui| {
+                    egui::Frame::group(ui.style())
+                        .fill(ui.style().visuals.extreme_bg_color)
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                // Top section with map name and button
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&replay.map_name)
+                                        .strong()
+                                        .size(16.0));
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let is_downloading = self.downloading_replay_id
+                                            .as_ref()
+                                            .map_or(false, |id| id == &replay.id);
+
+                                        if !is_downloading &&
+                                            self.styled_button(ui, "Download & Process").clicked() {
+                                            self.process_online_replay(&replay.id);
+                                        }
+                                    });
+                                });
+    
+                                // Rest of the rendering code remains the same
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label("Game Mode:");
+                                    ui.label(&replay.game_mode);
+                                    ui.separator();
+                                    ui.label("Date:");
+                                    ui.label(&replay.created_date);
+                                });
+    
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label("Workshop Mods:");
+                                    ui.label(&replay.workshop_mods);
+                                });
+    
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label("Total Time:");
+                                    ui.label(format!("{}s", replay.time_since));
+                                });
+    
+                                ui.separator();
+    
+                                egui::ScrollArea::horizontal()
+                                    .id_source(format!("scroll_{}", replay.id))
+                                    .max_height(72.0)
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                            for (idx, user) in replay.users.iter().enumerate() {
+                                                ui.push_id(idx, |ui| {
+                                                    self.render_user_avatar(ui, ctx, user);
+                                                });
+                                            }
+                                        });
+                                    });
+                            });
+                        });
+                });
+        });
+    }
+
+    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, user: &str) {
+        if let Some(texture) = self.profile_textures.get(user) {
+            if ui.add_sized(egui::vec2(64.0, 64.0), egui::ImageButton::new(texture)).clicked() {
+                ctx.output_mut(|out| {
+                    out.copied_text = user.to_string();
+                });
+            }
+        } else {
+            if ui.add_sized(egui::vec2(64.0, 64.0), egui::Button::new("Loading")).clicked() {
+                ctx.output_mut(|out| {
+                    out.copied_text = user.to_string();
+                });
+            }
+            if !self.loading_profiles.contains(user) {
+                self.load_profile(user.to_string());
+            }
+        }
     }
 
     fn render_process_page(&mut self, ui: &mut egui::Ui) {
@@ -741,6 +1266,11 @@ impl ReplayApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let icon_data = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("Failed to load icon")
+        .to_rgba8();
+    let (icon_width, icon_height) = icon_data.dimensions();
+
     let native_options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_min_inner_size([800.0, 600.0])
@@ -748,7 +1278,12 @@ fn main() -> eframe::Result<()> {
             .with_decorations(true)
             .with_drag_and_drop(true)
             .with_resizable(true)
-            .with_title("Pavlov Replay Toolbox"),
+            .with_title("Pavlov Replay Toolbox")
+            .with_icon(egui::IconData {
+                rgba: icon_data.into_raw(),
+                width: icon_width,
+                height: icon_height,
+            }),
         default_theme: eframe::Theme::Dark,
         follow_system_theme: true,
         centered: true,
