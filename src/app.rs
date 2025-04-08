@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -16,12 +17,16 @@ use crate::tools::replay_processor::{
     ReplayItem, ApiResponse, ApiReplay, MetaData, API_BASE_URL,
 };
 
+type DownloadedReplaysSender = std::sync::mpsc::Sender<String>;
+type DownloadedReplaysReceiver = std::sync::mpsc::Receiver<String>;
+
 #[derive(Clone, Default)]
 pub struct ReplayFilters {
     pub game_mode: String,
     pub map_name: String,
     pub workshop_mods: String,
     pub platform: PlatformFilter,
+    pub user_id: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -66,11 +71,16 @@ pub struct ReplayApp {
     profile_rx: std::sync::mpsc::Receiver<(String, egui::ColorImage)>,
     download_progress: Arc<Mutex<Option<DownloadProgress>>>,
     downloading_replay_id: Option<String>,
+    downloaded_replays: HashSet<String>,
+    downloaded_tx: DownloadedReplaysSender,
+    downloaded_rx: DownloadedReplaysReceiver,
 }
 
 impl ReplayApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
+        let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
+
         let mut app = Self {
             progress: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new("Loading replays...".to_string())),
@@ -86,8 +96,12 @@ impl ReplayApp {
             profile_rx,
             download_progress: Arc::new(Mutex::new(None)),
             downloading_replay_id: None,
+            downloaded_replays: HashSet::new(),
+            downloaded_tx,
+            downloaded_rx,
         };
         app.refresh_replays();
+        app.check_downloaded_replays();
         app
     }
 
@@ -220,9 +234,10 @@ impl ReplayApp {
         self.is_downloading = true;
         self.downloading_replay_id = Some(replay_id.to_string());
 
-        let replay_id = replay_id.to_string();
+        let replay_id_clone = replay_id.to_string();
         let status_clone = Arc::clone(&self.status);
         let progress_clone = Arc::clone(&self.download_progress);
+        let downloaded_tx = self.downloaded_tx.clone();
 
         thread::spawn(move || {
             if let Ok(mut status) = status_clone.lock() {
@@ -264,7 +279,7 @@ impl ReplayApp {
                     thread::sleep(Duration::from_millis(100));
                 }
 
-                let replay_data = download_replay(&replay_id)?;
+                let replay_data = download_replay(&replay_id_clone)?;
 
                 update_progress(0, 100, true);
                 for i in 0..100 {
@@ -272,9 +287,8 @@ impl ReplayApp {
                     update_progress(i + 1, 100, true);
                 }
 
-                // Fetch metadata
                 let metadata_result = client
-                    .get(&format!("{}/meta/{}", API_BASE_URL, replay_id))
+                    .get(&format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
                     .send()?
                     .json::<MetaData>()?;
 
@@ -291,14 +305,17 @@ impl ReplayApp {
                 let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
                 let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
                 let filename = format!(
-                    "{}-{}-{}.replay",
+                    "{}-{}-{}({}).replay",
                     sanitized_name,
                     metadata_result.game_mode,
-                    formatted_date
+                    formatted_date,
+                    replay_id_clone
                 );
                 let output_path = std::env::current_dir()?.join(filename);
 
                 fs::write(output_path, replay_data)?;
+
+                let _ = downloaded_tx.send(replay_id_clone);
 
                 if let Ok(mut status) = status_clone.lock() {
                     *status = "Replay downloaded and processed successfully.".to_string();
@@ -317,6 +334,46 @@ impl ReplayApp {
                 *progress = None;
             }
         });
+    }
+
+    fn check_downloaded_replays(&mut self) {
+        if let Ok(entries) = std::fs::read_dir(std::env::current_dir().unwrap_or_default()) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_file() {
+                        if let Some(ext) = entry.path().extension() {
+                            if ext == "replay" {
+                                if let Some(filename) = entry.path().file_name() {
+                                    if let Some(filename_str) = filename.to_str() {
+                                        if let Some(id_start) = filename_str.rfind('(') {
+                                            if let Some(id_end) = filename_str[id_start..].find(')') {
+                                                let id = &filename_str[id_start + 1..id_start + id_end];
+                                                self.downloaded_replays.insert(id.to_string());
+                                                continue;
+                                            }
+                                        }
+
+                                        if let Ok(mut file) = std::fs::File::open(entry.path()) {
+                                            let mut buffer = [0; 1024];
+                                            if file.read(&mut buffer).is_ok() {
+                                                let content = String::from_utf8_lossy(&buffer);
+                                                if let Some(id_start) = content.find("\"id\":\"") {
+                                                    let id_start = id_start + 6;
+                                                    if let Some(id_end) = content[id_start..].find('"') {
+                                                        let id = &content[id_start..id_start + id_end];
+                                                        self.downloaded_replays.insert(id.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn render_download_progress(&mut self, ctx: &Context) {
@@ -367,25 +424,26 @@ impl ReplayApp {
     fn get_filtered_replays(&self) -> Vec<ReplayItem> {
         self.replay_list.replays.iter()
             .filter(|replay| {
-                // Game mode filter
                 if !self.replay_list.filters.game_mode.is_empty() && 
                    !replay.game_mode.to_lowercase().contains(&self.replay_list.filters.game_mode.to_lowercase()) {
                     return false;
                 }
 
-                // Map name filter
                 if !self.replay_list.filters.map_name.is_empty() && 
                    !replay.map_name.to_lowercase().contains(&self.replay_list.filters.map_name.to_lowercase()) {
                     return false;
                 }
 
-                // Workshop mods filter
                 if !self.replay_list.filters.workshop_mods.is_empty() && 
                    !replay.workshop_mods.to_lowercase().contains(&self.replay_list.filters.workshop_mods.to_lowercase()) {
                     return false;
                 }
 
-                // Platform filter
+                if !self.replay_list.filters.user_id.is_empty() &&
+                   !replay.users.iter().any(|user| user.to_lowercase().contains(&self.replay_list.filters.user_id.to_lowercase())) {
+                    return false;
+                }
+
                 match self.replay_list.filters.platform {
                     PlatformFilter::All => true,
                     PlatformFilter::Quest => replay.shack,
@@ -407,7 +465,6 @@ impl ReplayApp {
         });
         ui.separator();
 
-        // Filters at the top
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label("Game Mode:");
@@ -425,6 +482,11 @@ impl ReplayApp {
                              egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods)
                              .hint_text("Filter"));
                 
+                ui.label("User ID:");
+                ui.add_sized([120.0, 24.0],
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.user_id)
+                             .hint_text("Filter"));
+                
                 ui.label("Platform:");
                 egui::ComboBox::from_id_source("platform_filter")
                     .selected_text(match self.replay_list.filters.platform {
@@ -440,7 +502,6 @@ impl ReplayApp {
             });
         });
 
-        // Apply filters before displaying
         let filtered_replays = self.get_filtered_replays();
 
         egui::ScrollArea::vertical()
@@ -459,9 +520,7 @@ impl ReplayApp {
                 }
             });
             
-        // Pagination controls as a floating panel in bottom right
         if self.replay_list.total_pages > 0 {
-            // Create a floating pagination controls area
             egui::Area::new("pagination_controls")
                 .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
                 .order(egui::Order::Foreground)
@@ -510,7 +569,6 @@ impl ReplayApp {
                         .fill(ui.style().visuals.extreme_bg_color)
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
-                                // Top section with map name and button
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(&replay.map_name)
                                         .strong()
@@ -520,8 +578,16 @@ impl ReplayApp {
                                         let is_downloading = self.downloading_replay_id
                                             .as_ref()
                                             .map_or(false, |id| id == &replay.id);
+                                        
+                                        let is_downloaded = self.downloaded_replays.contains(&replay.id);
 
-                                        if !is_downloading &&
+                                        if is_downloaded {
+                                            ui.add_enabled(
+                                                false, 
+                                                egui::Button::new("Downloaded")
+                                                    .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
+                                            );
+                                        } else if !is_downloading && 
                                             self.styled_button(ui, "Download & Process").clicked() {
                                             self.process_online_replay(&replay.id);
                                         }
@@ -619,7 +685,6 @@ impl ReplayApp {
                     }
                 }
                 
-                // Border and hover effect
                 if let Some(resp) = response {
                     if resp.hovered() {
                         let rect = resp.rect;
@@ -642,7 +707,6 @@ impl ReplayApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                // Directory selection
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         if let Some(path) = &self.selected_path {
@@ -679,7 +743,6 @@ impl ReplayApp {
                     }
                 }
 
-                // Progress indicators
                 if let Ok(progress) = self.progress.lock() {
                     if let Some(p) = &*progress {
                         ui.add_space(16.0);
@@ -703,7 +766,6 @@ impl ReplayApp {
                     }
                 }
 
-                // Status message
                 if let Ok(status) = self.status.lock() {
                     ui.add_space(8.0);
                     ui.separator();
@@ -738,7 +800,10 @@ impl App for ReplayApp {
             self.loading_profiles.remove(&user);
         }
         
-        // Process completion dialog (keep at top level)
+        while let Ok(replay_id) = self.downloaded_rx.try_recv() {
+            self.downloaded_replays.insert(replay_id);
+        }
+
         if self.show_completion_dialog {
             egui::Window::new("Processing Complete")
                 .collapsible(false)
@@ -754,7 +819,6 @@ impl App for ReplayApp {
                 });
         }
 
-        // Top navigation bar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -784,7 +848,6 @@ impl App for ReplayApp {
             ui.separator();
         });
 
-        // Main content area
         CentralPanel::default().show(ctx, |ui| {
             match self.current_page {
                 Page::Main => self.render_main_page(ui, ctx),
@@ -792,7 +855,6 @@ impl App for ReplayApp {
             }
         });
 
-        // Check processing status for local processing
         if self.is_processing_local {
             if let Ok(status) = self.status.lock() {
                 if status.contains("complete") || status.contains("Error") {
@@ -802,7 +864,6 @@ impl App for ReplayApp {
             }
         }
         
-        // Check download status separately
         if self.is_downloading && self.downloading_replay_id.is_none() {
             self.is_downloading = false;
         }
