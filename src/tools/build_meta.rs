@@ -1,5 +1,5 @@
-use crate::replay_buffer::ReplayBuffer;
-use crate::MetaData;
+use crate::tools::replay_buffer::ReplayBuffer;
+use crate::tools::replay_processor::MetaData;
 use chrono::{DateTime, FixedOffset, TimeZone};
 use std::error::Error;
 
