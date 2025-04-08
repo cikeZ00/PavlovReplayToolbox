@@ -338,7 +338,8 @@ impl ReplayApp {
                     thread::sleep(Duration::from_millis(100));
                 }
 
-                let replay_data = download_replay(&replay_id_clone)?;
+                let replay_data = download_replay(&replay_id_clone)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
 
                 update_progress(0, 100, true);
                 for i in 0..100 {

@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use reqwest::blocking::{Client, Response};
 use chrono::DateTime;
+use rayon::prelude::*;
 
 use crate::tools::build_meta::{self, build_meta};
 use crate::tools::build_replay::{self, build_replay, ReplayPart};
@@ -169,7 +170,11 @@ pub struct Chunk {
     pub size_in_bytes: Option<i32>,
 }
 
-fn get_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Response, Box<dyn Error>> {
+fn get_with_retry(
+    client: &Client,
+    url: &str,
+    max_retries: u32,
+) -> Result<Response, Box<dyn Error + Send + Sync>> {
     let mut attempt = 0;
     let mut backoff = Duration::from_secs(2);
     loop {
@@ -190,7 +195,11 @@ fn get_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Respon
     }
 }
 
-fn post_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Response, Box<dyn Error>> {
+fn post_with_retry(
+    client: &Client,
+    url: &str,
+    max_retries: u32,
+) -> Result<Response, Box<dyn Error + Send + Sync>> {
     let mut attempt = 0;
     let mut backoff = Duration::from_secs(2);
     loop {
@@ -211,7 +220,7 @@ fn post_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Respo
     }
 }
 
-pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     // Validate replay id (only accept alphanumeric IDs)
     if !replay_id.chars().all(|c| c.is_alphanumeric()) {
         return Err("Invalid replay id".into());
@@ -223,7 +232,7 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         .build()?;
 
     let max_retries = 5; // maximum retry attempts
-
+    
     let mut replay_data = serde_json::Map::new();
     let mut offset = 0;
     let mut find_all_response = None;
@@ -244,18 +253,19 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         }
         offset += 100;
     }
-
+    
     let replay_info = find_all_response.ok_or("Recording not available")?;
     replay_data.insert("find".into(), serde_json::to_value(&replay_info)?);
-
+    
     let start_url = format!("{}/replay/{}/startDownloading?user", SERVER, replay_id);
-    let start_download: serde_json::Value = post_with_retry(&client, &start_url, max_retries)?.json()?;
+    let start_download: serde_json::Value =
+        post_with_retry(&client, &start_url, max_retries)?.json()?;
     replay_data.insert("start_downloading".into(), start_download.clone());
 
     if start_download["state"] != "Recorded" {
         return Err("Recording must be finished before download".into());
     }
-
+    
     let meta: MetaData = get_with_retry(&client, &format!("{}/meta/{}", SERVER, replay_id), max_retries)?.json()?;
     replay_data.insert("meta".into(), serde_json::to_value(&meta)?);
 
@@ -264,7 +274,7 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
     let events_pavlov: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id), max_retries)?.json()?;
     replay_data.insert("events_pavlov".into(), serde_json::to_value(&events_pavlov)?);
-
+    
     let header_url = format!("{}/replay/{}/file/replay.header", SERVER, replay_id);
     let header_data = get_with_retry(&client, &header_url, max_retries)?.bytes()?.to_vec();
 
@@ -280,33 +290,40 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         size_in_bytes: None,
     });
 
-    // Download stream chunks into memory and capture header timing info.
+    // Determine number of stream chunks.
     let num_chunks = start_download["numChunks"].as_i64().unwrap_or(0) as usize;
-    for i in 0..num_chunks {
-        let chunk_url = format!("{}/replay/{}/file/stream.{}", SERVER, replay_id, i);
-        let response = get_with_retry(&client, &chunk_url, max_retries)?;
+    
+    let mut stream_chunks: Vec<(usize, Chunk)> = (0..num_chunks)
+        .into_par_iter()
+        .map(|i| {
+            let chunk_url = format!("{}/replay/{}/file/stream.{}", SERVER, replay_id, i);
+            // Each parallel thread uses the same client instance.
+            let response = get_with_retry(&client, &chunk_url, max_retries)?;
+            let time1 = response.headers()
+                .get("mtime1")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok());
+            let time2 = response.headers()
+                .get("mtime2")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok());
+            let chunk_data = response.bytes()?.to_vec();
 
-        let time1 = response.headers()
-            .get("mtime1")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok());
-        let time2 = response.headers()
-            .get("mtime2")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok());
-
-        let chunk_data = response.bytes()?.to_vec();
-        download_chunks.push(Chunk {
-            data: chunk_data,
-            chunk_type: 1,
-            time1,
-            time2,
-            id: None,
-            group: None,
-            metadata: None,
-            size_in_bytes: None,
-        });
-    }
+            Ok((i, Chunk {
+                data: chunk_data,
+                chunk_type: 1,
+                time1,
+                time2,
+                id: None,
+                group: None,
+                metadata: None,
+                size_in_bytes: None,
+            }))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error + Send + Sync>>>()?;
+    
+    stream_chunks.sort_by_key(|(i, _)| *i);
+    download_chunks.extend(stream_chunks.into_iter().map(|(_, chunk)| chunk));
 
     // Process events from both groups and add them as chunks.
     for event in events.events {
@@ -340,12 +357,15 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     }
 
     // Build the replay by first constructing the meta buffer and then appending each chunk.
-    let meta_buffer = build_meta(&meta)?;
+    let meta_buffer = build_meta(&meta)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     let mut parts = vec![ReplayPart::Meta(meta_buffer)];
     parts.extend(download_chunks.into_iter().map(ReplayPart::Chunk));
-
+    
     build_replay(&parts)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
 }
+
 
 pub fn replay_chunks_dir() -> PathBuf {
     let exe_dir = std::env::current_exe()
