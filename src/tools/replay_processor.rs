@@ -169,7 +169,6 @@ pub struct Chunk {
     pub size_in_bytes: Option<i32>,
 }
 
-/// Helper function to send a GET request with retry logic.
 fn get_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Response, Box<dyn Error>> {
     let mut attempt = 0;
     let mut backoff = Duration::from_secs(2);
@@ -191,7 +190,6 @@ fn get_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Respon
     }
 }
 
-/// Helper function to send a POST request with retry logic.
 fn post_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Response, Box<dyn Error>> {
     let mut attempt = 0;
     let mut backoff = Duration::from_secs(2);
@@ -213,7 +211,6 @@ fn post_with_retry(client: &Client, url: &str, max_retries: u32) -> Result<Respo
     }
 }
 
-/// Modified download_replay function with retry logic for handling intermittent network issues.
 pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     // Validate replay id (only accept alphanumeric IDs)
     if !replay_id.chars().all(|c| c.is_alphanumeric()) {
@@ -227,7 +224,6 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
     let max_retries = 5; // maximum retry attempts
 
-    // In-memory storage for the replay metadata and timing
     let mut replay_data = serde_json::Map::new();
     let mut offset = 0;
     let mut find_all_response = None;
@@ -249,11 +245,9 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         offset += 100;
     }
 
-    // Ensure we found the replay; otherwise return an error.
     let replay_info = find_all_response.ok_or("Recording not available")?;
     replay_data.insert("find".into(), serde_json::to_value(&replay_info)?);
 
-    // Start the download process via a POST request.
     let start_url = format!("{}/replay/{}/startDownloading?user", SERVER, replay_id);
     let start_download: serde_json::Value = post_with_retry(&client, &start_url, max_retries)?.json()?;
     replay_data.insert("start_downloading".into(), start_download.clone());
@@ -262,7 +256,6 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         return Err("Recording must be finished before download".into());
     }
 
-    // Fetch metadata and event data with retries.
     let meta: MetaData = get_with_retry(&client, &format!("{}/meta/{}", SERVER, replay_id), max_retries)?.json()?;
     replay_data.insert("meta".into(), serde_json::to_value(&meta)?);
 
@@ -272,7 +265,6 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let events_pavlov: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id), max_retries)?.json()?;
     replay_data.insert("events_pavlov".into(), serde_json::to_value(&events_pavlov)?);
 
-    // Download the header (using retry on failure)
     let header_url = format!("{}/replay/{}/file/replay.header", SERVER, replay_id);
     let header_data = get_with_retry(&client, &header_url, max_retries)?.bytes()?.to_vec();
 
@@ -352,7 +344,6 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut parts = vec![ReplayPart::Meta(meta_buffer)];
     parts.extend(download_chunks.into_iter().map(ReplayPart::Chunk));
 
-    // Finally, build the replay and return its bytes—all in memory.
     build_replay(&parts)
 }
 
