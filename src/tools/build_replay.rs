@@ -1,6 +1,4 @@
-// build_replay.rs
-
-use crate::Chunk;
+use crate::tools::replay_processor::Chunk;
 use std::error::Error;
 
 /// A part of the replay file: either the meta part or a chunk.
