@@ -1,8 +1,7 @@
 name: Build Windows Production Binary
 
 permissions:
-  contents: write   
-  packages: write    
+  contents: write
 
 on:
   push:
@@ -46,6 +45,7 @@ jobs:
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: "v${{ github.run_number }}"
           files: target/release/PavlovReplayToolbox.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
