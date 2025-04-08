@@ -21,7 +21,22 @@ pub struct ReplayFilters {
     pub game_mode: String,
     pub map_name: String,
     pub workshop_mods: String,
+    pub platform: PlatformFilter,
 }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PlatformFilter {
+    All,
+    Quest,
+    PC,
+}
+
+impl Default for PlatformFilter {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ReplayListState {
     pub replays: Vec<ReplayItem>,
@@ -105,7 +120,7 @@ impl ReplayApp {
 
         let offset = self.replay_list.current_page * 100;
         let url = format!(
-            "{}/find/?game=all&offset={}&shack=true&live=false",
+            "{}/find/?game=all&offset={}&live=false",
             API_BASE_URL, offset
         );
 
@@ -349,6 +364,38 @@ impl ReplayApp {
         )
     }
 
+    fn get_filtered_replays(&self) -> Vec<ReplayItem> {
+        self.replay_list.replays.iter()
+            .filter(|replay| {
+                // Game mode filter
+                if !self.replay_list.filters.game_mode.is_empty() && 
+                   !replay.game_mode.to_lowercase().contains(&self.replay_list.filters.game_mode.to_lowercase()) {
+                    return false;
+                }
+
+                // Map name filter
+                if !self.replay_list.filters.map_name.is_empty() && 
+                   !replay.map_name.to_lowercase().contains(&self.replay_list.filters.map_name.to_lowercase()) {
+                    return false;
+                }
+
+                // Workshop mods filter
+                if !self.replay_list.filters.workshop_mods.is_empty() && 
+                   !replay.workshop_mods.to_lowercase().contains(&self.replay_list.filters.workshop_mods.to_lowercase()) {
+                    return false;
+                }
+
+                // Platform filter
+                match self.replay_list.filters.platform {
+                    PlatformFilter::All => true,
+                    PlatformFilter::Quest => replay.shack,
+                    PlatformFilter::PC => !replay.shack, 
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
     fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("Available Replays");
@@ -365,25 +412,50 @@ impl ReplayApp {
             ui.horizontal(|ui| {
                 ui.label("Game Mode:");
                 ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode));
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode)
+                             .hint_text("Filter"));
+                
                 ui.label("Map:");
                 ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.map_name));
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.map_name)
+                             .hint_text("Filter"));
+                
                 ui.label("Workshop Mods:");
                 ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods));
+                             egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods)
+                             .hint_text("Filter"));
+                
+                ui.label("Platform:");
+                egui::ComboBox::from_id_source("platform_filter")
+                    .selected_text(match self.replay_list.filters.platform {
+                        PlatformFilter::All => "All",
+                        PlatformFilter::Quest => "Quest",
+                        PlatformFilter::PC => "PC",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::All, "All");
+                        ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::Quest, "Quest");
+                        ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::PC, "PC");
+                    });
             });
         });
+
+        // Apply filters before displaying
+        let filtered_replays = self.get_filtered_replays();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
 
-                // Clone the replays to avoid borrow checker issues
-                let replays = self.replay_list.replays.clone();
-                for replay in &replays {
-                    self.render_replay_item(ui, ctx, replay);
+                if filtered_replays.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("No replays match the current filters");
+                    });
+                } else {
+                    for replay in &filtered_replays {
+                        self.render_replay_item(ui, ctx, replay);
+                    }
                 }
 
                 // Pagination controls
