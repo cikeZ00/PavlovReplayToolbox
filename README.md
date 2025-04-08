@@ -4,7 +4,7 @@ PavlovReplayToolbox is a Rust-based toolbox designed to facilitate the download 
 
 ## Features
 
-- **Replay Downloading**: Download replays directly from LocalPavTV.
+- **Replay Downloading**: Download replays directly from PavlovTV.
 - **Replay Processing**: Convert downloaded data into full .replay files for further use.
 
 ## Getting Started
