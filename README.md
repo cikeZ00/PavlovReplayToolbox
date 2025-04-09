@@ -19,10 +19,8 @@ PavlovReplayToolbox is a Rust-based toolbox designed to facilitate the download 
 ## Screenshots
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b0dbf9cc-14ab-45d0-88e8-85fd149e7d3f" width="30%" />
-  <img src="https://github.com/user-attachments/assets/248bc2ef-7359-4799-8c4f-ae045ea38ff3" width="30%" />
+  <img src="https://github.com/user-attachments/assets/59af3630-f940-44ae-bc76-af878658bee9" width="30%" />
   <img src="https://github.com/user-attachments/assets/97488e14-d1b7-4601-9c7b-e1e1c4a4c0d9" width="30%" />
-</p>
-
 
 ## Getting Started
 
