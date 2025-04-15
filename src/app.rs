@@ -137,19 +137,53 @@ impl ReplayApp {
     fn load_profile(&mut self, user: String) {
         self.loading_profiles.insert(user.clone());
         let profile_tx = self.profile_tx.clone();
+        let status_clone = Arc::clone(&self.status);
+        
         thread::spawn(move || {
-            let client = Client::builder()
+            let client = match Client::builder()
                 .timeout(Some(Duration::from_secs(10)))
-                .build()
-                .expect("Failed to build HTTP client");
+                .build() {
+                    Ok(client) => client,
+                    Err(e) => {
+                        if let Ok(mut status) = status_clone.lock() {
+                            *status = format!("Failed to initialize HTTP client for profile: {}", e);
+                        }
+                        return;
+                    }
+                };
+                
             let url = format!("http://prod.cdn.pavlov-vr.com/avatar/{}.png", user);
-            if let Ok(response) = client.get(&url).send() {
-                if let Ok(bytes) = response.bytes() {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let img = img.to_rgba8();
-                        let size = [img.width() as usize, img.height() as usize];
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
-                        let _ = profile_tx.send((user, color_image));
+            
+            match client.get(&url).send() {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        // Profile not found or server error, but we can silently fail
+                        return;
+                    }
+                    
+                    match response.bytes() {
+                        Ok(bytes) => {
+                            match image::load_from_memory(&bytes) {
+                                Ok(img) => {
+                                    let img = img.to_rgba8();
+                                    let size = [img.width() as usize, img.height() as usize];
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
+                                    let _ = profile_tx.send((user, color_image));
+                                },
+                                Err(_) => {
+                                    // Invalid image data, can silently fail
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            // Failed to get bytes, can silently fail
+                        }
+                    }
+                },
+                Err(e) => {
+                    if e.is_timeout() || e.is_connect() {
+                        // Connection issues, can silently fail
+                        return;
                     }
                 }
             }
@@ -157,9 +191,12 @@ impl ReplayApp {
     }
 
     fn fetch_replays(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = Client::builder()
+        let client = match Client::builder()
             .timeout(Duration::from_secs(10))
-            .build()?;
+            .build() {
+                Ok(client) => client,
+                Err(e) => return Err(format!("Failed to initialize HTTP client: {}", e).into())
+            };
 
         let offset = self.replay_list.current_page * 100;
         let url = format!(
@@ -167,9 +204,33 @@ impl ReplayApp {
             API_BASE_URL, offset
         );
 
-        let response = client.get(&url).send()?.json::<ApiResponse>()?;
-        self.replay_list.total_pages = (response.total as f32 / 100.0).ceil() as usize;
-        self.replay_list.replays = response
+        let response = match client.get(&url).send() {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    return Err(format!("Server returned error status: {} - {}", 
+                        resp.status().as_u16(), 
+                        resp.status().canonical_reason().unwrap_or("Unknown error")).into());
+                }
+                resp
+            },
+            Err(e) => {
+                if e.is_timeout() {
+                    return Err("Connection timed out. Server may be down or unreachable.".into());
+                } else if e.is_connect() {
+                    return Err("Failed to connect to server. Please check your internet connection.".into());
+                } else {
+                    return Err(format!("Network error: {}", e).into());
+                }
+            }
+        };
+
+        let api_response = match response.json::<ApiResponse>() {
+            Ok(data) => data,
+            Err(e) => return Err(format!("Failed to parse server response: {}. The API may have changed format.", e).into())
+        };
+
+        self.replay_list.total_pages = (api_response.total as f32 / 100.0).ceil() as usize;
+        self.replay_list.replays = api_response
             .replays
             .into_iter()
             .map(|r| ReplayItem {
@@ -303,9 +364,15 @@ impl ReplayApp {
                 *status = "Downloading replay...".to_string();
             }
 
-            let client = Client::builder()
-                .build()
-                .unwrap();
+            let client = match Client::builder().build() {
+                Ok(client) => client,
+                Err(e) => {
+                    if let Ok(mut status) = status_clone.lock() {
+                        *status = format!("Failed to initialize HTTP client: {}", e);
+                    }
+                    return;
+                }
+            };
 
             let total_steps = 5;
             let mut current_step = 0;
@@ -338,8 +405,10 @@ impl ReplayApp {
                     thread::sleep(Duration::from_millis(100));
                 }
 
-                let replay_data = download_replay(&replay_id_clone)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                let replay_data = match download_replay(&replay_id_clone) {
+                    Ok(data) => data,
+                    Err(e) => return Err(format!("Failed to download replay data: {}", e).into())
+                };
 
                 update_progress(0, 100, true);
                 for i in 0..100 {
@@ -347,20 +416,48 @@ impl ReplayApp {
                     update_progress(i + 1, 100, true);
                 }
 
-                let metadata_result = client
+                let metadata_result = match client
                     .get(&format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
-                    .send()?
-                    .json::<MetaData>()?;
+                    .send() {
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                return Err(format!(
+                                    "Failed to fetch replay metadata: Server returned {} - {}", 
+                                    resp.status().as_u16(),
+                                    resp.status().canonical_reason().unwrap_or("Unknown error")
+                                ).into());
+                            }
+                            
+                            match resp.json::<MetaData>() {
+                                Ok(data) => data,
+                                Err(e) => return Err(format!(
+                                    "Failed to parse replay metadata: {}. The API format may have changed.", e
+                                ).into())
+                            }
+                        },
+                        Err(e) => {
+                            if e.is_timeout() {
+                                return Err("Connection timed out while fetching replay metadata.".into());
+                            } else if e.is_connect() {
+                                return Err("Failed to connect to metadata server. Please check your internet connection.".into());
+                            } else {
+                                return Err(format!("Network error retrieving metadata: {}", e).into());
+                            }
+                        }
+                    };
 
-                let created_datetime = chrono::DateTime::parse_from_rfc3339(&metadata_result.created)
+                let created_datetime = match chrono::DateTime::parse_from_rfc3339(&metadata_result.created)
                     .or_else(|_| -> Result<_, Box<dyn std::error::Error>> {
                         let ts = metadata_result.created
                             .parse::<i64>()
-                            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                            .map_err(|e| format!("Invalid timestamp format: {}", e))?;
                         chrono::DateTime::from_timestamp(ts, 0)
                             .map(|dt| dt.fixed_offset())
                             .ok_or_else(|| "Invalid timestamp".into())
-                    })?;
+                    }) {
+                        Ok(dt) => dt,
+                        Err(e) => return Err(format!("Failed to parse replay date: {}", e).into())
+                    };
 
                 let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
                 let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
@@ -373,7 +470,10 @@ impl ReplayApp {
                 );
                 let output_path = download_dir.join(filename);
 
-                fs::write(output_path, replay_data)?;
+                match fs::write(output_path, replay_data) {
+                    Ok(_) => {},
+                    Err(e) => return Err(format!("Failed to save replay file: {}", e).into())
+                }
 
                 let _ = downloaded_tx.send(replay_id_clone);
 
@@ -524,6 +624,21 @@ impl ReplayApp {
             });
         });
         ui.separator();
+
+        // Display any API errors prominently
+        if let Ok(status) = self.status.lock() {
+            if status.contains("Error") || status.contains("Failed") {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(&*status)
+                            .color(ui.style().visuals.error_fg_color)
+                            .strong()
+                    ).wrap(true));
+                });
+                ui.separator();
+            }
+        }
 
         ui.group(|ui| {
             ui.horizontal(|ui| {
