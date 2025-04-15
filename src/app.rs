@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Add these new structs for notifications
 #[derive(Clone)]
 struct Notification {
     id: u64,
