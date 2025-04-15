@@ -8,6 +8,25 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Add these new structs for notifications
+#[derive(Clone)]
+struct Notification {
+    id: u64,
+    message: String,
+    created_at: Instant,
+    duration_ms: u64,
+    notification_type: NotificationType,
+    position: f32, // For animation
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum NotificationType {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
 use serde::{Serialize, Deserialize};
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{App, CreationContext};
@@ -99,6 +118,9 @@ pub struct ReplayApp {
     downloaded_rx: DownloadedReplaysReceiver,
     settings: Settings,
     last_refresh_time: Instant,
+    // New fields for notification system
+    notifications: Vec<Notification>,
+    next_notification_id: u64,
 }
 
 impl ReplayApp {
@@ -128,6 +150,8 @@ impl ReplayApp {
             downloaded_rx,
             settings,
             last_refresh_time: std::time::Instant::now(),
+            notifications: Vec::new(),
+            next_notification_id: 0,
         };
         app.refresh_replays();
         app.check_downloaded_replays();
@@ -260,15 +284,18 @@ impl ReplayApp {
                 if let Ok(mut status) = self.status.lock() {
                     *status = "Replays loaded successfully".to_string();
                 }
+                self.show_success("Replays loaded successfully");
                 self.last_refresh_time = std::time::Instant::now();
                 
                 // Check for auto-download triggers after refreshing
                 self.check_auto_download_triggers();
             }
             Err(e) => {
+                let error_message = format!("Error loading replays: {}", e);
                 if let Ok(mut status) = self.status.lock() {
-                    *status = format!("Error loading replays: {}", e);
+                    *status = error_message.clone();
                 }
+                self.show_error(error_message);
             }
         }
     }
@@ -352,6 +379,7 @@ impl ReplayApp {
     fn process_online_replay(&mut self, replay_id: &str) {
         self.is_downloading = true;
         self.downloading_replay_id = Some(replay_id.to_string());
+        self.show_info(format!("Downloading replay {}", replay_id));
 
         let replay_id_clone = replay_id.to_string();
         let status_clone = Arc::clone(&self.status);
@@ -625,20 +653,6 @@ impl ReplayApp {
         });
         ui.separator();
 
-        // Display any API errors prominently
-        if let Ok(status) = self.status.lock() {
-            if status.contains("Error") || status.contains("Failed") {
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(egui::Label::new(
-                        egui::RichText::new(&*status)
-                            .color(ui.style().visuals.error_fg_color)
-                            .strong()
-                    ).wrap(true));
-                });
-                ui.separator();
-            }
-        }
 
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -975,9 +989,9 @@ impl ReplayApp {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.settings.download_dir = path;
                             if let Err(err) = self.save_settings() {
-                                if let Ok(mut status) = self.status.lock() {
-                                    *status = format!("Error saving settings: {}", err);
-                                }
+                                self.show_error(format!("Error saving settings: {}", err));
+                            } else {
+                                self.show_success("Settings saved successfully");
                             }
                         }
                     }
@@ -1036,13 +1050,9 @@ impl ReplayApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if self.styled_button(ui, "Apply").clicked() {
                     if let Err(err) = self.save_settings() {
-                        if let Ok(mut status) = self.status.lock() {
-                            *status = format!("Error saving settings: {}", err);
-                        }
+                        self.show_error(format!("Error saving settings: {}", err));
                     } else {
-                        if let Ok(mut status) = self.status.lock() {
-                            *status = "Settings saved successfully".to_string();
-                        }
+                        self.show_success("Settings saved successfully");
                     }
                 }
             });
@@ -1085,10 +1095,144 @@ impl ReplayApp {
         fs::create_dir_all(&path)?;
         Ok(path)
     }
+
+    fn show_notification(&mut self, message: String, notification_type: NotificationType) {
+        let id = self.next_notification_id;
+        self.next_notification_id += 1;
+        
+        self.notifications.push(Notification {
+            id,
+            message,
+            created_at: Instant::now(),
+            duration_ms: 5000, // 5 seconds
+            notification_type,
+            position: 0.0, // Will be animated
+        });
+    }
+    
+    fn show_info(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Info)
+    }
+    
+    fn show_success(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Success)
+    }
+    
+    fn show_warning(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Warning)
+    }
+    
+    fn show_error(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Error)
+    }
+    
+    fn update_notifications(&mut self) {
+        let now = Instant::now();
+        
+        // Remove expired notifications
+        self.notifications.retain(|notification| {
+            now.duration_since(notification.created_at).as_millis() < notification.duration_ms as u128
+        });
+        
+        // Sort notifications by creation time (newest last) so they stack properly
+        // This ensures newest notifications appear at the bottom
+        self.notifications.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        
+        // Update position values for each notification (0.0 to 1.0)
+        for notification in &mut self.notifications {
+            // Calculate position for animation (0.0 to 1.0 over 500ms)
+            let elapsed_ms = now.duration_since(notification.created_at).as_millis() as f32;
+            
+            // Slide-in animation happens over first 500ms (increased from 300ms)
+            let animation_duration = 500.0;
+            
+            // Use cubic easing for smoother motion
+            let t = (elapsed_ms / animation_duration).min(1.0);
+            notification.position = Self::cubic_ease_out(t);
+        }
+    }
+
+    fn cubic_ease_out(t: f32) -> f32 {
+        let f = t - 1.0;
+        f * f * f + 1.0
+    }
+
+    fn render_notifications(&self, ctx: &egui::Context) {
+        let notification_height = 40.0;
+        let notification_spacing = 8.0;
+        let max_visible = 5;
+        let bottom_margin = 20.0;
+        
+        // Only show up to max_visible notifications
+        let visible_notifications = self.notifications.iter().take(max_visible).collect::<Vec<_>>();
+        
+        // Render notifications from bottom to top (newest at bottom)
+        for (idx, notification) in visible_notifications.iter().enumerate() {
+            // Animation calculations
+            let pos = notification.position; // 0.0 to 1.0
+            
+            // Calculate fade in/out alpha
+            let elapsed_ms = Instant::now().duration_since(notification.created_at).as_millis() as f32;
+            let fade_out_start = notification.duration_ms as f32 - 700.0; // Extended fade-out time (was 500ms)
+            
+            let alpha = if pos < 0.4 {  // Extended fade-in period (was 0.3)
+                // Smoother fade in with cubic easing
+                Self::cubic_ease_out(pos / 0.4)
+            } else if elapsed_ms > fade_out_start {
+                // Smoother fade out
+                (1.0 - ((elapsed_ms - fade_out_start) / 700.0).min(1.0)).powf(2.0)
+            } else {
+                // Fully visible
+                1.0
+            };
+            
+            // Base position for this notification in the stack
+            let base_position = idx as f32 * (notification_height + notification_spacing);
+            
+            // Apply slide-in effect with improved easing
+            let slide_offset = if pos < 1.0 { (1.0 - pos) * notification_height * 1.2 } else { 0.0 };
+            
+            // Final position from bottom of screen
+            let bottom_offset = bottom_margin + base_position + slide_offset;
+            
+            let bg_color = match notification.notification_type {
+                NotificationType::Info => egui::Color32::from_rgba_premultiplied(30, 130, 220, (alpha * 220.0) as u8),
+                NotificationType::Success => egui::Color32::from_rgba_premultiplied(30, 150, 30, (alpha * 220.0) as u8),
+                NotificationType::Warning => egui::Color32::from_rgba_premultiplied(220, 160, 20, (alpha * 220.0) as u8),
+                NotificationType::Error => egui::Color32::from_rgba_premultiplied(220, 40, 40, (alpha * 220.0) as u8),
+            };
+            
+            // Render notification at calculated position
+            egui::Area::new(format!("notification_{}", notification.id))
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -bottom_offset))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(bg_color)
+                        .rounding(8.0)
+                        .shadow(egui::epaint::Shadow::small_light())
+                        .show(ui, |ui| {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                ui.colored_label(
+                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, (alpha * 255.0) as u8),
+                                    &notification.message
+                                );
+                                ui.add_space(12.0);
+                            });
+                            ui.add_space(6.0);
+                        });
+                });
+        }
+    }
 }
 
 impl App for ReplayApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Update notifications
+        self.update_notifications();
+        
         self.render_download_progress(ctx);
         
         while let Ok((user, color_image)) = self.profile_rx.try_recv() {
@@ -1106,7 +1250,8 @@ impl App for ReplayApp {
         }
         
         while let Ok(replay_id) = self.downloaded_rx.try_recv() {
-            self.downloaded_replays.insert(replay_id);
+            self.downloaded_replays.insert(replay_id.clone());
+            self.show_success(format!("Replay {} downloaded successfully", replay_id));
         }
 
         if self.show_completion_dialog {
@@ -1197,6 +1342,9 @@ impl App for ReplayApp {
                  self.current_page == Page::Main {
             self.check_auto_download_triggers();
         }
+
+        // Render notifications at the end
+        self.render_notifications(ctx);
         
         ctx.request_repaint_after(Duration::from_millis(32));
     }
