@@ -223,10 +223,19 @@ impl ReplayApp {
             };
 
         let offset = self.replay_list.current_page * 100;
-        let url = format!(
+        
+        // Build URL with platform filter using the shack parameter
+        let mut url = format!(
             "{}/find/?game=all&offset={}&live=false",
             API_BASE_URL, offset
         );
+        
+        // Add shack parameter for platform filtering
+        match self.replay_list.filters.platform {
+            PlatformFilter::Quest => url.push_str("&shack=true"),
+            PlatformFilter::PC => url.push_str("&shack=false"),
+            PlatformFilter::All => {} // Don't add shack parameter for all platforms
+        }
 
         let response = match client.get(&url).send() {
             Ok(resp) => {
@@ -632,11 +641,7 @@ impl ReplayApp {
                     return false;
                 }
 
-                match self.replay_list.filters.platform {
-                    PlatformFilter::All => true,
-                    PlatformFilter::Quest => replay.shack,
-                    PlatformFilter::PC => !replay.shack, 
-                }
+                true
             })
             .cloned()
             .collect()
