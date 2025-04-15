@@ -8,6 +8,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone)]
+struct Notification {
+    id: u64,
+    message: String,
+    created_at: Instant,
+    duration_ms: u64,
+    notification_type: NotificationType,
+    position: f32, // For animation
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum NotificationType {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
 use serde::{Serialize, Deserialize};
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{App, CreationContext};
@@ -99,6 +117,8 @@ pub struct ReplayApp {
     downloaded_rx: DownloadedReplaysReceiver,
     settings: Settings,
     last_refresh_time: Instant,
+    notifications: Vec<Notification>,
+    next_notification_id: u64,
 }
 
 impl ReplayApp {
@@ -128,6 +148,8 @@ impl ReplayApp {
             downloaded_rx,
             settings,
             last_refresh_time: std::time::Instant::now(),
+            notifications: Vec::new(),
+            next_notification_id: 0,
         };
         app.refresh_replays();
         app.check_downloaded_replays();
@@ -137,19 +159,53 @@ impl ReplayApp {
     fn load_profile(&mut self, user: String) {
         self.loading_profiles.insert(user.clone());
         let profile_tx = self.profile_tx.clone();
+        let status_clone = Arc::clone(&self.status);
+        
         thread::spawn(move || {
-            let client = Client::builder()
+            let client = match Client::builder()
                 .timeout(Some(Duration::from_secs(10)))
-                .build()
-                .expect("Failed to build HTTP client");
+                .build() {
+                    Ok(client) => client,
+                    Err(e) => {
+                        if let Ok(mut status) = status_clone.lock() {
+                            *status = format!("Failed to initialize HTTP client for profile: {}", e);
+                        }
+                        return;
+                    }
+                };
+                
             let url = format!("http://prod.cdn.pavlov-vr.com/avatar/{}.png", user);
-            if let Ok(response) = client.get(&url).send() {
-                if let Ok(bytes) = response.bytes() {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let img = img.to_rgba8();
-                        let size = [img.width() as usize, img.height() as usize];
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
-                        let _ = profile_tx.send((user, color_image));
+            
+            match client.get(&url).send() {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        // Profile not found or server error, but we can silently fail
+                        return;
+                    }
+                    
+                    match response.bytes() {
+                        Ok(bytes) => {
+                            match image::load_from_memory(&bytes) {
+                                Ok(img) => {
+                                    let img = img.to_rgba8();
+                                    let size = [img.width() as usize, img.height() as usize];
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
+                                    let _ = profile_tx.send((user, color_image));
+                                },
+                                Err(_) => {
+                                    // Invalid image data, can silently fail
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            // Failed to get bytes, can silently fail
+                        }
+                    }
+                },
+                Err(e) => {
+                    if e.is_timeout() || e.is_connect() {
+                        // Connection issues, can silently fail
+                        return;
                     }
                 }
             }
@@ -157,19 +213,55 @@ impl ReplayApp {
     }
 
     fn fetch_replays(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = Client::builder()
+        let client = match Client::builder()
             .timeout(Duration::from_secs(10))
-            .build()?;
+            .build() {
+                Ok(client) => client,
+                Err(e) => return Err(format!("Failed to initialize HTTP client: {}", e).into())
+            };
 
         let offset = self.replay_list.current_page * 100;
-        let url = format!(
+        
+        // Build URL with platform filter using the shack parameter
+        let mut url = format!(
             "{}/find/?game=all&offset={}&live=false",
             API_BASE_URL, offset
         );
+        
+        // Add shack parameter for platform filtering
+        match self.replay_list.filters.platform {
+            PlatformFilter::Quest => url.push_str("&shack=true"),
+            PlatformFilter::PC => url.push_str("&shack=false"),
+            PlatformFilter::All => {} // Don't add shack parameter for all platforms
+        }
 
-        let response = client.get(&url).send()?.json::<ApiResponse>()?;
-        self.replay_list.total_pages = (response.total as f32 / 100.0).ceil() as usize;
-        self.replay_list.replays = response
+        let response = match client.get(&url).send() {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    return Err(format!("Server returned error status: {} - {}", 
+                        resp.status().as_u16(), 
+                        resp.status().canonical_reason().unwrap_or("Unknown error")).into());
+                }
+                resp
+            },
+            Err(e) => {
+                if e.is_timeout() {
+                    return Err("Connection timed out. Server may be down or unreachable.".into());
+                } else if e.is_connect() {
+                    return Err("Failed to connect to server. Please check your internet connection.".into());
+                } else {
+                    return Err(format!("Network error: {}", e).into());
+                }
+            }
+        };
+
+        let api_response = match response.json::<ApiResponse>() {
+            Ok(data) => data,
+            Err(e) => return Err(format!("Failed to parse server response: {}. The API may have changed format.", e).into())
+        };
+
+        self.replay_list.total_pages = (api_response.total as f32 / 100.0).ceil() as usize;
+        self.replay_list.replays = api_response
             .replays
             .into_iter()
             .map(|r| ReplayItem {
@@ -199,15 +291,18 @@ impl ReplayApp {
                 if let Ok(mut status) = self.status.lock() {
                     *status = "Replays loaded successfully".to_string();
                 }
+                self.show_success("Replays loaded successfully");
                 self.last_refresh_time = std::time::Instant::now();
                 
                 // Check for auto-download triggers after refreshing
                 self.check_auto_download_triggers();
             }
             Err(e) => {
+                let error_message = format!("Error loading replays: {}", e);
                 if let Ok(mut status) = self.status.lock() {
-                    *status = format!("Error loading replays: {}", e);
+                    *status = error_message.clone();
                 }
+                self.show_error(error_message);
             }
         }
     }
@@ -291,6 +386,7 @@ impl ReplayApp {
     fn process_online_replay(&mut self, replay_id: &str) {
         self.is_downloading = true;
         self.downloading_replay_id = Some(replay_id.to_string());
+        self.show_info(format!("Downloading replay {}", replay_id));
 
         let replay_id_clone = replay_id.to_string();
         let status_clone = Arc::clone(&self.status);
@@ -303,9 +399,15 @@ impl ReplayApp {
                 *status = "Downloading replay...".to_string();
             }
 
-            let client = Client::builder()
-                .build()
-                .unwrap();
+            let client = match Client::builder().build() {
+                Ok(client) => client,
+                Err(e) => {
+                    if let Ok(mut status) = status_clone.lock() {
+                        *status = format!("Failed to initialize HTTP client: {}", e);
+                    }
+                    return;
+                }
+            };
 
             let total_steps = 5;
             let mut current_step = 0;
@@ -338,8 +440,10 @@ impl ReplayApp {
                     thread::sleep(Duration::from_millis(100));
                 }
 
-                let replay_data = download_replay(&replay_id_clone)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                let replay_data = match download_replay(&replay_id_clone) {
+                    Ok(data) => data,
+                    Err(e) => return Err(format!("Failed to download replay data: {}", e).into())
+                };
 
                 update_progress(0, 100, true);
                 for i in 0..100 {
@@ -347,20 +451,48 @@ impl ReplayApp {
                     update_progress(i + 1, 100, true);
                 }
 
-                let metadata_result = client
+                let metadata_result = match client
                     .get(&format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
-                    .send()?
-                    .json::<MetaData>()?;
+                    .send() {
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                return Err(format!(
+                                    "Failed to fetch replay metadata: Server returned {} - {}", 
+                                    resp.status().as_u16(),
+                                    resp.status().canonical_reason().unwrap_or("Unknown error")
+                                ).into());
+                            }
+                            
+                            match resp.json::<MetaData>() {
+                                Ok(data) => data,
+                                Err(e) => return Err(format!(
+                                    "Failed to parse replay metadata: {}. The API format may have changed.", e
+                                ).into())
+                            }
+                        },
+                        Err(e) => {
+                            if e.is_timeout() {
+                                return Err("Connection timed out while fetching replay metadata.".into());
+                            } else if e.is_connect() {
+                                return Err("Failed to connect to metadata server. Please check your internet connection.".into());
+                            } else {
+                                return Err(format!("Network error retrieving metadata: {}", e).into());
+                            }
+                        }
+                    };
 
-                let created_datetime = chrono::DateTime::parse_from_rfc3339(&metadata_result.created)
+                let created_datetime = match chrono::DateTime::parse_from_rfc3339(&metadata_result.created)
                     .or_else(|_| -> Result<_, Box<dyn std::error::Error>> {
                         let ts = metadata_result.created
                             .parse::<i64>()
-                            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                            .map_err(|e| format!("Invalid timestamp format: {}", e))?;
                         chrono::DateTime::from_timestamp(ts, 0)
                             .map(|dt| dt.fixed_offset())
                             .ok_or_else(|| "Invalid timestamp".into())
-                    })?;
+                    }) {
+                        Ok(dt) => dt,
+                        Err(e) => return Err(format!("Failed to parse replay date: {}", e).into())
+                    };
 
                 let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
                 let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
@@ -373,7 +505,10 @@ impl ReplayApp {
                 );
                 let output_path = download_dir.join(filename);
 
-                fs::write(output_path, replay_data)?;
+                match fs::write(output_path, replay_data) {
+                    Ok(_) => {},
+                    Err(e) => return Err(format!("Failed to save replay file: {}", e).into())
+                }
 
                 let _ = downloaded_tx.send(replay_id_clone);
 
@@ -504,11 +639,7 @@ impl ReplayApp {
                     return false;
                 }
 
-                match self.replay_list.filters.platform {
-                    PlatformFilter::All => true,
-                    PlatformFilter::Quest => replay.shack,
-                    PlatformFilter::PC => !replay.shack, 
-                }
+                true
             })
             .cloned()
             .collect()
@@ -524,6 +655,7 @@ impl ReplayApp {
             });
         });
         ui.separator();
+
 
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -860,9 +992,9 @@ impl ReplayApp {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.settings.download_dir = path;
                             if let Err(err) = self.save_settings() {
-                                if let Ok(mut status) = self.status.lock() {
-                                    *status = format!("Error saving settings: {}", err);
-                                }
+                                self.show_error(format!("Error saving settings: {}", err));
+                            } else {
+                                self.show_success("Settings saved successfully");
                             }
                         }
                     }
@@ -921,13 +1053,9 @@ impl ReplayApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if self.styled_button(ui, "Apply").clicked() {
                     if let Err(err) = self.save_settings() {
-                        if let Ok(mut status) = self.status.lock() {
-                            *status = format!("Error saving settings: {}", err);
-                        }
+                        self.show_error(format!("Error saving settings: {}", err));
                     } else {
-                        if let Ok(mut status) = self.status.lock() {
-                            *status = "Settings saved successfully".to_string();
-                        }
+                        self.show_success("Settings saved successfully");
                     }
                 }
             });
@@ -970,10 +1098,127 @@ impl ReplayApp {
         fs::create_dir_all(&path)?;
         Ok(path)
     }
+
+    fn show_notification(&mut self, message: String, notification_type: NotificationType) {
+        let id = self.next_notification_id;
+        self.next_notification_id += 1;
+        
+        self.notifications.push(Notification {
+            id,
+            message,
+            created_at: Instant::now(),
+            duration_ms: 5000,
+            notification_type,
+            position: 0.0,
+        });
+    }
+    
+    fn show_info(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Info)
+    }
+    
+    fn show_success(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Success)
+    }
+    
+    fn show_warning(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Warning)
+    }
+    
+    fn show_error(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Error)
+    }
+    
+    fn update_notifications(&mut self) {
+        let now = Instant::now();
+        
+        self.notifications.retain(|notification| {
+            now.duration_since(notification.created_at).as_millis() < notification.duration_ms as u128
+        });
+        
+        self.notifications.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        
+        for notification in &mut self.notifications {
+            let elapsed_ms = now.duration_since(notification.created_at).as_millis() as f32;
+            let animation_duration = 500.0;
+            let t = (elapsed_ms / animation_duration).min(1.0);
+            notification.position = Self::cubic_ease_out(t);
+        }
+    }
+
+    fn cubic_ease_out(t: f32) -> f32 {
+        let f = t - 1.0;
+        f * f * f + 1.0
+    }
+
+    fn render_notifications(&self, ctx: &egui::Context) {
+        let notification_height = 40.0;
+        let notification_spacing = 8.0;
+        let max_visible = 5;
+        let bottom_margin = 20.0;
+        
+        let visible_notifications = self.notifications.iter().take(max_visible).collect::<Vec<_>>();
+        
+        // Render notifications from bottom to top
+        for (idx, notification) in visible_notifications.iter().enumerate() {
+            let pos = notification.position;
+            
+            let elapsed_ms = Instant::now().duration_since(notification.created_at).as_millis() as f32;
+            let fade_out_start = notification.duration_ms as f32 - 700.0; // Extended fade-out time (was 500ms)
+            
+            let alpha = if pos < 0.4 { 
+                Self::cubic_ease_out(pos / 0.4)
+            } else if elapsed_ms > fade_out_start {
+                (1.0 - ((elapsed_ms - fade_out_start) / 700.0).min(1.0)).powf(2.0)
+            } else {
+                1.0
+            };
+            
+            // Base position in stack
+            let base_position = idx as f32 * (notification_height + notification_spacing);
+            let slide_offset = if pos < 1.0 { (1.0 - pos) * notification_height * 1.2 } else { 0.0 };
+            
+            // Final position
+            let bottom_offset = bottom_margin + base_position + slide_offset;
+            
+            let bg_color = match notification.notification_type {
+                NotificationType::Info => egui::Color32::from_rgba_premultiplied(30, 130, 220, (alpha * 220.0) as u8),
+                NotificationType::Success => egui::Color32::from_rgba_premultiplied(30, 150, 30, (alpha * 220.0) as u8),
+                NotificationType::Warning => egui::Color32::from_rgba_premultiplied(220, 160, 20, (alpha * 220.0) as u8),
+                NotificationType::Error => egui::Color32::from_rgba_premultiplied(220, 40, 40, (alpha * 220.0) as u8),
+            };
+            
+            // Render notification
+            egui::Area::new(format!("notification_{}", notification.id))
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -bottom_offset))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(bg_color)
+                        .rounding(8.0)
+                        .shadow(egui::epaint::Shadow::small_light())
+                        .show(ui, |ui| {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                ui.colored_label(
+                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, (alpha * 255.0) as u8),
+                                    &notification.message
+                                );
+                                ui.add_space(12.0);
+                            });
+                            ui.add_space(6.0);
+                        });
+                });
+        }
+    }
 }
 
 impl App for ReplayApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Update notifications
+        self.update_notifications();
+        
         self.render_download_progress(ctx);
         
         while let Ok((user, color_image)) = self.profile_rx.try_recv() {
@@ -991,7 +1236,8 @@ impl App for ReplayApp {
         }
         
         while let Ok(replay_id) = self.downloaded_rx.try_recv() {
-            self.downloaded_replays.insert(replay_id);
+            self.downloaded_replays.insert(replay_id.clone());
+            self.show_success(format!("Replay {} downloaded successfully", replay_id));
         }
 
         if self.show_completion_dialog {
@@ -1034,7 +1280,6 @@ impl App for ReplayApp {
                     self.current_page = Page::ProcessLocal;
                 });
 
-                // Add flexible space to push the Settings button to the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_sized(
                         [80.0, button_height],
@@ -1082,6 +1327,8 @@ impl App for ReplayApp {
                  self.current_page == Page::Main {
             self.check_auto_download_triggers();
         }
+
+        self.render_notifications(ctx);
         
         ctx.request_repaint_after(Duration::from_millis(32));
     }
