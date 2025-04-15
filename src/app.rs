@@ -117,7 +117,6 @@ pub struct ReplayApp {
     downloaded_rx: DownloadedReplaysReceiver,
     settings: Settings,
     last_refresh_time: Instant,
-    // New fields for notification system
     notifications: Vec<Notification>,
     next_notification_id: u64,
 }
