@@ -1164,12 +1164,12 @@ impl ReplayApp {
             let pos = notification.position;
             
             let elapsed_ms = Instant::now().duration_since(notification.created_at).as_millis() as f32;
-            let fade_out_start = notification.duration_ms as f32 - 700.0; // Extended fade-out time (was 500ms)
+            let fade_out_start = notification.duration_ms as f32 - 3000.0;
             
             let alpha = if pos < 0.4 { 
                 Self::cubic_ease_out(pos / 0.4)
             } else if elapsed_ms > fade_out_start {
-                (1.0 - ((elapsed_ms - fade_out_start) / 700.0).min(1.0)).powf(2.0)
+                (1.0 - ((elapsed_ms - fade_out_start) / 900.0).min(1.0)).powf(2.0)
             } else {
                 1.0
             };
@@ -1182,10 +1182,10 @@ impl ReplayApp {
             let bottom_offset = bottom_margin + base_position + slide_offset;
             
             let bg_color = match notification.notification_type {
-                NotificationType::Info => egui::Color32::from_rgba_premultiplied(30, 130, 220, (alpha * 220.0) as u8),
-                NotificationType::Success => egui::Color32::from_rgba_premultiplied(30, 150, 30, (alpha * 220.0) as u8),
-                NotificationType::Warning => egui::Color32::from_rgba_premultiplied(220, 160, 20, (alpha * 220.0) as u8),
-                NotificationType::Error => egui::Color32::from_rgba_premultiplied(220, 40, 40, (alpha * 220.0) as u8),
+                NotificationType::Info => egui::Color32::from_rgba_unmultiplied(30, 130, 220, (alpha * 220.0) as u8),
+                NotificationType::Success => egui::Color32::from_rgba_unmultiplied(30, 150, 30, (alpha * 220.0) as u8),
+                NotificationType::Warning => egui::Color32::from_rgba_unmultiplied(220, 160, 20, (alpha * 220.0) as u8),
+                NotificationType::Error => egui::Color32::from_rgba_unmultiplied(220, 40, 40, (alpha * 220.0) as u8),
             };
             
             // Render notification
@@ -1202,7 +1202,7 @@ impl ReplayApp {
                             ui.horizontal(|ui| {
                                 ui.add_space(12.0);
                                 ui.colored_label(
-                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, (alpha * 255.0) as u8),
+                                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, (alpha * 255.0) as u8),
                                     &notification.message
                                 );
                                 ui.add_space(12.0);
