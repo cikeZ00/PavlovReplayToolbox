@@ -1104,9 +1104,9 @@ impl ReplayApp {
             id,
             message,
             created_at: Instant::now(),
-            duration_ms: 5000, // 5 seconds
+            duration_ms: 5000,
             notification_type,
-            position: 0.0, // Will be animated
+            position: 0.0,
         });
     }
     
@@ -1129,24 +1129,15 @@ impl ReplayApp {
     fn update_notifications(&mut self) {
         let now = Instant::now();
         
-        // Remove expired notifications
         self.notifications.retain(|notification| {
             now.duration_since(notification.created_at).as_millis() < notification.duration_ms as u128
         });
         
-        // Sort notifications by creation time (newest last) so they stack properly
-        // This ensures newest notifications appear at the bottom
         self.notifications.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         
-        // Update position values for each notification (0.0 to 1.0)
         for notification in &mut self.notifications {
-            // Calculate position for animation (0.0 to 1.0 over 500ms)
             let elapsed_ms = now.duration_since(notification.created_at).as_millis() as f32;
-            
-            // Slide-in animation happens over first 500ms (increased from 300ms)
             let animation_duration = 500.0;
-            
-            // Use cubic easing for smoother motion
             let t = (elapsed_ms / animation_duration).min(1.0);
             notification.position = Self::cubic_ease_out(t);
         }
@@ -1163,36 +1154,28 @@ impl ReplayApp {
         let max_visible = 5;
         let bottom_margin = 20.0;
         
-        // Only show up to max_visible notifications
         let visible_notifications = self.notifications.iter().take(max_visible).collect::<Vec<_>>();
         
-        // Render notifications from bottom to top (newest at bottom)
+        // Render notifications from bottom to top
         for (idx, notification) in visible_notifications.iter().enumerate() {
-            // Animation calculations
-            let pos = notification.position; // 0.0 to 1.0
+            let pos = notification.position;
             
-            // Calculate fade in/out alpha
             let elapsed_ms = Instant::now().duration_since(notification.created_at).as_millis() as f32;
             let fade_out_start = notification.duration_ms as f32 - 700.0; // Extended fade-out time (was 500ms)
             
-            let alpha = if pos < 0.4 {  // Extended fade-in period (was 0.3)
-                // Smoother fade in with cubic easing
+            let alpha = if pos < 0.4 { 
                 Self::cubic_ease_out(pos / 0.4)
             } else if elapsed_ms > fade_out_start {
-                // Smoother fade out
                 (1.0 - ((elapsed_ms - fade_out_start) / 700.0).min(1.0)).powf(2.0)
             } else {
-                // Fully visible
                 1.0
             };
             
-            // Base position for this notification in the stack
+            // Base position in stack
             let base_position = idx as f32 * (notification_height + notification_spacing);
-            
-            // Apply slide-in effect with improved easing
             let slide_offset = if pos < 1.0 { (1.0 - pos) * notification_height * 1.2 } else { 0.0 };
             
-            // Final position from bottom of screen
+            // Final position
             let bottom_offset = bottom_margin + base_position + slide_offset;
             
             let bg_color = match notification.notification_type {
@@ -1202,7 +1185,7 @@ impl ReplayApp {
                 NotificationType::Error => egui::Color32::from_rgba_premultiplied(220, 40, 40, (alpha * 220.0) as u8),
             };
             
-            // Render notification at calculated position
+            // Render notification
             egui::Area::new(format!("notification_{}", notification.id))
                 .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -bottom_offset))
                 .order(egui::Order::Foreground)
@@ -1294,7 +1277,6 @@ impl App for ReplayApp {
                     self.current_page = Page::ProcessLocal;
                 });
 
-                // Add flexible space to push the Settings button to the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_sized(
                         [80.0, button_height],
@@ -1343,7 +1325,6 @@ impl App for ReplayApp {
             self.check_auto_download_triggers();
         }
 
-        // Render notifications at the end
         self.render_notifications(ctx);
         
         ctx.request_repaint_after(Duration::from_millis(32));
