@@ -1107,7 +1107,7 @@ impl ReplayApp {
             id,
             message,
             created_at: Instant::now(),
-            duration_ms: 5000,
+            duration_ms: 4000,
             notification_type,
             position: 0.0,
         });
@@ -1140,7 +1140,7 @@ impl ReplayApp {
         
         for notification in &mut self.notifications {
             let elapsed_ms = now.duration_since(notification.created_at).as_millis() as f32;
-            let animation_duration = 500.0;
+            let animation_duration = 400.0;
             let t = (elapsed_ms / animation_duration).min(1.0);
             notification.position = Self::cubic_ease_out(t);
         }
@@ -1164,7 +1164,7 @@ impl ReplayApp {
             let pos = notification.position;
             
             let elapsed_ms = Instant::now().duration_since(notification.created_at).as_millis() as f32;
-            let fade_out_start = notification.duration_ms as f32 - 3000.0;
+            let fade_out_start = notification.duration_ms as f32 - 1000.0; 
             
             let alpha = if pos < 0.4 { 
                 Self::cubic_ease_out(pos / 0.4)
