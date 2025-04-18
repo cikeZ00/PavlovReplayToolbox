@@ -22,6 +22,7 @@ struct Notification {
 enum NotificationType {
     Info,
     Success,
+    #[allow(dead_code)]
     Warning,
     Error,
 }
@@ -1120,7 +1121,8 @@ impl ReplayApp {
     fn show_success(&mut self, message: impl Into<String>) {
         self.show_notification(message.into(), NotificationType::Success)
     }
-    
+
+    #[allow(dead_code)]
     fn show_warning(&mut self, message: impl Into<String>) {
         self.show_notification(message.into(), NotificationType::Warning)
     }
