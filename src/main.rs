@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 mod tools;
 mod app;
+mod pages;
 
 use eframe::{run_native, NativeOptions};
 

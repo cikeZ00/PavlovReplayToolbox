@@ -6,6 +6,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     thread::sleep,
     time::Duration,
 };
@@ -224,7 +225,10 @@ fn post_with_retry(
     }
 }
 
-pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+pub fn download_replay(
+    replay_id: &str,
+    progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>
+) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     // Validate replay id (only accept alphanumeric IDs)
     if !replay_id.chars().all(|c| c.is_alphanumeric()) {
         return Err("Invalid replay id".into());
@@ -270,18 +274,29 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send 
         return Err("Recording must be finished before download".into());
     }
     
-    let meta: MetaData = get_with_retry(&client, &format!("{}/meta/{}", SERVER, replay_id), max_retries)?.json()?;
-    replay_data.insert("meta".into(), serde_json::to_value(&meta)?);
-
-    let events: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id), max_retries)?.json()?;
-    replay_data.insert("events".into(), serde_json::to_value(&events)?);
-
-    let events_pavlov: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id), max_retries)?.json()?;
-    replay_data.insert("events_pavlov".into(), serde_json::to_value(&events_pavlov)?);
+    let num_chunks = start_download["numChunks"].as_i64().unwrap_or(0) as usize;
     
+    // Calculate total number of components: header + chunks + metadata sets
+    let total_components = num_chunks + 4; // Header + numChunks + meta + events + events_pavlov
+    let mut completed_components = 0;
+    
+    // Function to update progress
+    let update_progress = |step: usize| {
+        if let Some(callback) = &progress_callback {
+            callback(step, total_components);
+        }
+    };
+    
+    // Report initial progress
+    update_progress(completed_components);
+    
+    // Download header
     let header_url = format!("{}/replay/{}/file/replay.header", SERVER, replay_id);
     let header_data = get_with_retry(&client, &header_url, max_retries)?.bytes()?.to_vec();
-
+    
+    completed_components += 1;
+    update_progress(completed_components);
+    
     let mut download_chunks = Vec::new();
     download_chunks.push(Chunk {
         data: header_data,
@@ -294,13 +309,37 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send 
         size_in_bytes: None,
     });
 
-    // Determine number of stream chunks.
-    let num_chunks = start_download["numChunks"].as_i64().unwrap_or(0) as usize;
+    // Get metadata
+    let meta: MetaData = get_with_retry(&client, &format!("{}/meta/{}", SERVER, replay_id), max_retries)?.json()?;
+    replay_data.insert("meta".into(), serde_json::to_value(&meta)?);
     
+    completed_components += 1;
+    update_progress(completed_components);
+
+    // Get events
+    let events: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id), max_retries)?.json()?;
+    replay_data.insert("events".into(), serde_json::to_value(&events)?);
+    
+    completed_components += 1;
+    update_progress(completed_components);
+
+    // Get Pavlov events
+    let events_pavlov: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id), max_retries)?.json()?;
+    replay_data.insert("events_pavlov".into(), serde_json::to_value(&events_pavlov)?);
+    
+    completed_components += 1;
+    update_progress(completed_components);
+    
+    // Use atomic counter for thread-safe progress tracking
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let downloaded_chunks = Arc::new(AtomicUsize::new(0));
+    
+    // Download stream chunks in parallel
     let mut stream_chunks: Vec<(usize, Chunk)> = (0..num_chunks)
         .into_par_iter()
         .map(|i| {
             let chunk_url = format!("{}/replay/{}/file/stream.{}", SERVER, replay_id, i);
+            
             // Each parallel thread uses the same client instance.
             let response = get_with_retry(&client, &chunk_url, max_retries)?;
             let time1 = response.headers()
@@ -312,6 +351,12 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send 
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse().ok());
             let chunk_data = response.bytes()?.to_vec();
+
+            // Update progress after each chunk is downloaded
+            let downloaded = downloaded_chunks.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(callback) = &progress_callback {
+                callback(completed_components + downloaded, total_components);
+            }
 
             Ok((i, Chunk {
                 data: chunk_data,
@@ -366,10 +411,12 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send 
     let mut parts = vec![ReplayPart::Meta(meta_buffer)];
     parts.extend(download_chunks.into_iter().map(ReplayPart::Chunk));
     
+    // Final progress update
+    update_progress(total_components);
+
     build_replay(&parts)
         .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })
 }
-
 
 pub fn replay_chunks_dir() -> PathBuf {
     let exe_dir = std::env::current_exe()

@@ -15,7 +15,7 @@ struct Notification {
     created_at: Instant,
     duration_ms: u64,
     notification_type: NotificationType,
-    position: f32, // For animation
+    position: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,6 +25,25 @@ enum NotificationType {
     #[allow(dead_code)]
     Warning,
     Error,
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    name: String,
+    body: Option<String>,
+    published_at: String,
+}
+
+#[derive(Clone)]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    release_url: String,
+    release_name: String,
+    release_date: String,
+    release_notes: String,
 }
 
 use eframe::egui::{self, CentralPanel, Context};
@@ -37,8 +56,11 @@ use crate::tools::replay_processor::{
     MetaData, Progress, ReplayItem, API_BASE_URL,
 };
 
+use crate::pages;
+
 type DownloadedReplaysSender = std::sync::mpsc::Sender<String>;
 type DownloadedReplaysReceiver = std::sync::mpsc::Receiver<String>;
+type UpdateInfoReceiver = std::sync::mpsc::Receiver<UpdateInfo>;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -99,33 +121,36 @@ pub enum Page {
 }
 
 pub struct ReplayApp {
-    progress: Arc<Mutex<Option<Progress>>>,
-    status: Arc<Mutex<String>>,
-    is_processing_local: bool,
+    pub progress: Arc<Mutex<Option<Progress>>>,
+    pub status: Arc<Mutex<String>>,
+    pub is_processing_local: bool,
     is_downloading: bool,
-    selected_path: Option<PathBuf>,
-    show_completion_dialog: bool,
+    pub selected_path: Option<PathBuf>,
+    pub show_completion_dialog: bool,
     current_page: Page,
-    replay_list: ReplayListState,
+    pub replay_list: ReplayListState,
     profile_textures: HashMap<String, egui::TextureHandle>,
     loading_profiles: HashSet<String>,
     profile_tx: std::sync::mpsc::Sender<(String, egui::ColorImage)>,
     profile_rx: std::sync::mpsc::Receiver<(String, egui::ColorImage)>,
     download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    downloading_replay_id: Option<String>,
-    downloaded_replays: HashSet<String>,
+    pub downloading_replay_id: Option<String>,
+    pub downloaded_replays: HashSet<String>,
     downloaded_tx: DownloadedReplaysSender,
     downloaded_rx: DownloadedReplaysReceiver,
-    settings: Settings,
+    pub settings: Settings,
     last_refresh_time: Instant,
     notifications: Vec<Notification>,
     next_notification_id: u64,
+    update_info: Option<UpdateInfo>,
+    update_rx: UpdateInfoReceiver,
 }
 
 impl ReplayApp {
     pub fn new(_cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
         let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
 
         let settings = Self::load_settings().unwrap_or_default();
 
@@ -151,9 +176,94 @@ impl ReplayApp {
             last_refresh_time: Instant::now(),
             notifications: Vec::new(),
             next_notification_id: 0,
+            update_info: None,
+            update_rx,
         };
         app.refresh_replays();
         app.check_downloaded_replays();
+
+        // Start update check
+        let update_tx_clone = update_tx.clone();
+        thread::spawn(move || {
+            let current_version = env!("CARGO_PKG_VERSION");
+            
+            let client = match Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build() {
+                    Ok(client) => client,
+                    Err(_) => return,
+                };
+                
+            let url = "https://api.github.com/repos/cikeZ00/PavlovReplayToolbox/releases/latest";
+            
+            let response = match client.get(url)
+                .header("User-Agent", "PavlovReplayToolbox")
+                .send() {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            return;
+                        }
+                        resp
+                    },
+                    Err(_) => return,
+                };
+                
+            let github_release: GitHubRelease = match response.json() {
+                Ok(release) => release,
+                Err(_) => return,
+            };
+            
+            // Remove 'v' prefix if present
+            let latest_version = github_release.tag_name.trim_start_matches('v').to_string();
+            
+            // Compare versions
+            let current_segments: Vec<u32> = current_version
+                .split('.')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+                
+            let latest_segments: Vec<u32> = latest_version
+                .split('.')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+                
+            let update_available = if current_segments.len() == latest_segments.len() {
+                let mut is_newer = false;
+                for i in 0..current_segments.len() {
+                    if latest_segments[i] > current_segments[i] {
+                        is_newer = true;
+                        break;
+                    } else if latest_segments[i] < current_segments[i] {
+                        break;
+                    }
+                }
+                is_newer
+            } else {
+                // Simple fallback - just check if they're different
+                current_version != latest_version
+            };
+            
+            if update_available {
+                let update_info = UpdateInfo {
+                    current_version: current_version.to_string(),
+                    latest_version,
+                    release_url: github_release.html_url,
+                    release_name: github_release.name,
+                    release_date: github_release.published_at
+                        .split('T')
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                    release_notes: github_release.body.unwrap_or_default()
+                        .lines()
+                        .take(10)
+                        .collect::<Vec<&str>>()
+                        .join("\n"),
+                };
+                let _ = update_tx_clone.send(update_info);
+            }
+        });
+
         app
     }
 
@@ -223,17 +333,15 @@ impl ReplayApp {
 
         let offset = self.replay_list.current_page * 100;
         
-        // Build URL with platform filter using the shack parameter
         let mut url = format!(
             "{}/find/?game=all&offset={}&live=false",
             API_BASE_URL, offset
         );
         
-        // Add shack parameter for platform filtering
         match self.replay_list.filters.platform {
             PlatformFilter::Quest => url.push_str("&shack=true"),
             PlatformFilter::PC => url.push_str("&shack=false"),
-            PlatformFilter::All => {} // Don't add shack parameter for all platforms
+            PlatformFilter::All => {} 
         }
 
         let response = match client.get(&url).send() {
@@ -346,7 +454,7 @@ impl ReplayApp {
         }
     }
 
-    fn start_processing(&mut self) {
+    pub fn start_processing(&mut self) {
         if self.is_processing_local || self.selected_path.is_none() {
             return;
         }
@@ -384,7 +492,7 @@ impl ReplayApp {
         });
     }
 
-    fn process_online_replay(&mut self, replay_id: &str) {
+    pub fn process_online_replay(&mut self, replay_id: &str) {
         self.is_downloading = true;
         self.downloading_replay_id = Some(replay_id.to_string());
         self.show_info(format!("Downloading replay {}", replay_id));
@@ -410,52 +518,46 @@ impl ReplayApp {
                 }
             };
 
-            let total_steps = 5;
-            let mut current_step = 0;
-
-            let update_progress = |current: usize, max: usize, is_build: bool| {
-                if let Ok(mut progress) = progress_clone.lock() {
-                    let _progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
-                    if let Some(p) = progress.as_mut() {
-                        if is_build {
-                            p.build.current = current;
-                            p.build.max = max;
-                        } else {
-                            p.download.current = current;
-                            p.download.max = max;
-                        }
-                    }
-                }
-            };
-
+            // Initialize progress tracking
             if let Ok(mut progress) = progress_clone.lock() {
                 *progress = Some(DownloadProgress::default());
             }
 
+            let download_progress_callback = {
+                let progress_clone = Arc::clone(&progress_clone);
+                Box::new(move |current: usize, total: usize| {
+                    if let Ok(mut progress) = progress_clone.lock() {
+                        if let Some(p) = progress.as_mut() {
+                            p.download.current = current;
+                            p.download.max = total;
+                        }
+                    }
+                }) as Box<dyn Fn(usize, usize) + Send + Sync>
+            };
+
             let result: Result<(), Box<dyn std::error::Error>> = (|| {
-                update_progress(current_step, total_steps, false);
-
-                for step in 0..total_steps {
-                    current_step = step;
-                    update_progress(current_step, total_steps, false);
-                    thread::sleep(Duration::from_millis(100));
-                }
-
-                let replay_data = match download_replay(&replay_id_clone) {
+                let replay_data = match download_replay(&replay_id_clone, Some(download_progress_callback)) {
                     Ok(data) => data,
                     Err(e) => return Err(format!("Failed to download replay data: {}", e).into())
                 };
 
-                update_progress(0, 100, true);
-                for i in 0..100 {
-                    thread::sleep(Duration::from_millis(10));
-                    update_progress(i + 1, 100, true);
-                }
+                let update_build_progress = |current: usize, max: usize| {
+                    if let Ok(mut progress) = progress_clone.lock() {
+                        if let Some(p) = progress.as_mut() {
+                            p.build.current = current;
+                            p.build.max = max;
+                        }
+                    }
+                };
+
+                update_build_progress(0, 100);
 
                 let metadata_result = match client
                     .get(&format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
                     .send() {
                         Ok(resp) => {
+                            update_build_progress(10, 100);
+                            
                             if !resp.status().is_success() {
                                 return Err(format!(
                                     "Failed to fetch replay metadata: Server returned {} - {}", 
@@ -465,7 +567,10 @@ impl ReplayApp {
                             }
                             
                             match resp.json::<MetaData>() {
-                                Ok(data) => data,
+                                Ok(data) => {
+                                    update_build_progress(20, 100);
+                                    data
+                                },
                                 Err(e) => return Err(format!(
                                     "Failed to parse replay metadata: {}. The API format may have changed.", e
                                 ).into())
@@ -482,6 +587,8 @@ impl ReplayApp {
                         }
                     };
 
+                update_build_progress(30, 100);
+
                 let created_datetime = match chrono::DateTime::parse_from_rfc3339(&metadata_result.created)
                     .or_else(|_| -> Result<_, Box<dyn std::error::Error>> {
                         let ts = metadata_result.created
@@ -491,9 +598,14 @@ impl ReplayApp {
                             .map(|dt| dt.fixed_offset())
                             .ok_or_else(|| "Invalid timestamp".into())
                     }) {
-                        Ok(dt) => dt,
+                        Ok(dt) => {
+                            update_build_progress(40, 100);
+                            dt
+                        },
                         Err(e) => return Err(format!("Failed to parse replay date: {}", e).into())
                     };
+
+                update_build_progress(50, 100);
 
                 let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
                 let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
@@ -504,10 +616,16 @@ impl ReplayApp {
                     formatted_date,
                     replay_id_clone
                 );
-                let output_path = download_dir.join(filename);
 
+                update_build_progress(75, 100);
+                
+                let output_path = download_dir.join(filename);
+                update_build_progress(90, 100);
+                
                 match fs::write(output_path, replay_data) {
-                    Ok(_) => {},
+                    Ok(_) => {
+                        update_build_progress(100, 100);
+                    },
                     Err(e) => return Err(format!("Failed to save replay file: {}", e).into())
                 }
 
@@ -610,14 +728,14 @@ impl ReplayApp {
         }
     }
 
-    fn styled_button(&self, ui: &mut egui::Ui, text: &str) -> egui::Response {
+    pub fn styled_button(&self, ui: &mut egui::Ui, text: &str) -> egui::Response {
         ui.add_sized(
             [ui.available_width().min(120.0), 32.0],
             egui::Button::new(text)
         )
     }
 
-    fn get_filtered_replays(&self) -> Vec<ReplayItem> {
+    pub fn get_filtered_replays(&self) -> Vec<ReplayItem> {
         self.replay_list.replays.iter()
             .filter(|replay| {
                 if !self.replay_list.filters.game_mode.is_empty() && 
@@ -646,286 +764,7 @@ impl ReplayApp {
             .collect()
     }
 
-    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &Context) {
-        ui.horizontal(|ui| {
-            ui.heading("Available Replays");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.styled_button(ui, "Refresh").clicked() {
-                    self.refresh_replays();
-                }
-            });
-        });
-        ui.separator();
-
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                let total_width = ui.available_width() - 8.0;
-                let field_count = 5.0;
-                let spacing = ui.spacing().item_spacing.x * (field_count - 1.0);
-                let field_width = (total_width - spacing) / field_count;
-                let field_height = 24.0;
-
-                // Game Mode filter
-                ui.vertical(|ui| {
-                    ui.label("Game Mode:");
-                    ui.add_sized([field_width, field_height],
-                        egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode)
-                            .hint_text("Filter"));
-                });
-
-                // Map filter
-                ui.vertical(|ui| {
-                    ui.label("Map:");
-                    ui.add_sized([field_width, field_height],
-                        egui::TextEdit::singleline(&mut self.replay_list.filters.map_name)
-                            .hint_text("Filter"));
-                });
-
-                // Workshop Mods filter
-                ui.vertical(|ui| {
-                    ui.label("Workshop Mods:");
-                    ui.add_sized([field_width, field_height],
-                        egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods)
-                            .hint_text("Filter"));
-                });
-
-                // User ID filter
-                ui.vertical(|ui| {
-                    ui.label("User ID:");
-                    ui.add_sized([field_width, field_height],
-                        egui::TextEdit::singleline(&mut self.replay_list.filters.user_id)
-                            .hint_text("Filter"));
-                });
-
-                // Platform filter
-                ui.vertical(|ui| {
-                    ui.label("Platform:");
-                    egui::ComboBox::new(egui::Id::new("platform_filter"), "")
-                        .width(field_width)
-                        .selected_text(match self.replay_list.filters.platform {
-                            PlatformFilter::All => "All",
-                            PlatformFilter::Quest => "Quest",
-                            PlatformFilter::PC => "PC",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::All, "All");
-                            ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::Quest, "Quest");
-                            ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::PC, "PC");
-                        });
-                });
-            });
-        });
-        ui.separator();
-
-        let filtered_replays = self.get_filtered_replays();
-
-        let replay_item_height = 180.0;
-
-        let horizontal_margin = 8.0;
-
-        let full_width = ui.available_width();
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show_rows(ui, replay_item_height, filtered_replays.len(), |ui, row_range| {
-                if filtered_replays.is_empty() {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("No replays match the current filters");
-                    });
-                } else {
-                    for row in row_range {
-                        let replay = &filtered_replays[row];
-                        let (rect, _response) = ui.allocate_exact_size(
-                            egui::vec2(full_width - 2.0 * horizontal_margin, replay_item_height),
-                            egui::Sense::hover(),
-                        );
-                        let rect = rect.translate(egui::vec2(horizontal_margin, 0.0));
-                        ui.allocate_ui_at_rect(rect, |ui| {
-                            self.render_replay_item_with_width(ui, ctx, replay, rect.width());
-                        });
-                    }
-                }
-            });
-
-        if self.replay_list.total_pages > 0 {
-            egui::Area::new(egui::Id::new("pagination_controls"))
-                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    egui::Frame::new()
-                        .fill(ctx.style().visuals.window_fill)
-                        .shadow(egui::epaint::Shadow {
-                            offset: [0, 4],
-                            blur: 8,
-                            spread: 0,
-                            color: ctx.style().visuals.window_shadow.color,
-                        })
-                        .corner_radius(5.0)
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                if ui.add_enabled(
-                                    self.replay_list.current_page > 0,
-                                    egui::Button::new("<")
-                                        .min_size(egui::vec2(32.0, 32.0))
-                                ).clicked() {
-                                    self.replay_list.current_page -= 1;
-                                    self.refresh_replays();
-                                }
-                                
-                                ui.label(format!("Page {} of {}",
-                                    self.replay_list.current_page + 1,
-                                    self.replay_list.total_pages.max(1)
-                                ));
-                                
-                                if ui.add_enabled(
-                                    self.replay_list.current_page < self.replay_list.total_pages - 1,
-                                    egui::Button::new(">")
-                                        .min_size(egui::vec2(32.0, 32.0))
-                                ).clicked() {
-                                    self.replay_list.current_page += 1;
-                                    self.refresh_replays();
-                                }
-                            });
-                        });
-                });
-        }
-    }
-
-    fn render_replay_item_with_width(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &Context,
-        replay: &ReplayItem,
-        width: f32,
-    ) {
-        ui.push_id(replay.id.as_str(), |ui| {
-            egui::Frame::new()
-                .outer_margin(egui::Margin::same(0)) 
-                .show(ui, |ui| {
-                    egui::Frame::group(ui.style())
-                        .fill(ui.style().visuals.extreme_bg_color)
-                        .inner_margin(egui::Margin::symmetric(8, 0)) 
-                        .show(ui, |ui| {
-                            ui.set_width(width - 16.0); 
-                            self.render_replay_item_contents(ui, ctx, replay);
-                        });
-                });
-        });
-    }
-
-    fn render_replay_item_contents(&mut self, ui: &mut egui::Ui, ctx: &Context, replay: &ReplayItem) {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&replay.map_name)
-                    .strong()
-                    .size(16.0));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let is_downloading = self.downloading_replay_id
-                        .as_ref()
-                        .map_or(false, |id| id == &replay.id);
-                    
-                    let is_downloaded = self.downloaded_replays.contains(&replay.id);
-
-                    if is_downloaded {
-                        ui.add_enabled(
-                            false, 
-                            egui::Button::new("Downloaded")
-                                .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
-                        );
-                    } else if !is_downloading && 
-                        self.styled_button(ui, "Download & Process").clicked() {
-                        self.process_online_replay(&replay.id);
-                    }
-                });
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label("Game Mode:");
-                ui.label(&replay.game_mode);
-                ui.separator();
-                ui.label("Date:");
-                ui.label(&replay.created_date);
-            });
-
-            ui.horizontal(|ui| {
-                let mods_popup_id = egui::Id::new(format!("mods_popup_{}", replay.id));
-                let button = ui.button("Mods");
-                ui.vertical(|ui| {
-                    ui.add_space(2.0);
-                    ui.label(format!("{} mod{}", replay.modcount, if replay.modcount == 1 { "" } else { "s" }));
-                });
-
-                if button.clicked() {
-                    ui.memory_mut(|mem| mem.open_popup(mods_popup_id));
-                }
-
-                egui::popup::popup_below_widget(
-                    ui,
-                    mods_popup_id,
-                    &button,
-                    egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                    |ui: &mut egui::Ui| {
-                        ui.set_min_width(220.0);
-                        ui.label(egui::RichText::new("Workshop Mods").strong());
-                        ui.separator();
-                        if replay.workshop_mods.trim().is_empty() {
-                            ui.label("No mods for this replay.");
-                        } else {
-                            ui.label(&replay.workshop_mods);
-                        }
-                    }
-                );
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label("Time Since:");
-                ui.label(format!("{}s", replay.time_since));
-            });
-
-            ui.separator();
-
-            let avatar_row_height = 72.0;
-            let avatar_size = egui::vec2(64.0, 64.0);
-
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), avatar_row_height),
-                egui::Sense::hover(),
-            );
-
-            ui.allocate_ui_at_rect(rect, |ui| {
-                egui::ScrollArea::horizontal()
-                    .max_height(avatar_row_height)
-                    .show(ui, |ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            if replay.users.is_empty() {
-                                let (avatar_rect, _) = ui.allocate_exact_size(avatar_size, egui::Sense::hover());
-                                ui.painter().rect_filled(avatar_rect, 8.0, egui::Color32::DARK_GRAY);
-                                ui.painter().text(
-                                    avatar_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "No Users",
-                                    egui::FontId::proportional(14.0),
-                                    egui::Color32::WHITE,
-                                );
-                            } else {
-                                for (idx, user) in replay.users.iter().enumerate() {
-                                    ui.push_id(idx, |ui| {
-                                        self.render_user_avatar(ui, ctx, user);
-                                    });
-                                }
-                            }
-                        });
-                    });
-            });
-        });
-    }
-
-    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &Context, user: &str) {
+    pub fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &Context, user: &str) {
         let avatar_size = egui::vec2(64.0, 64.0);
         
         egui::Frame::new()
@@ -984,173 +823,12 @@ impl ReplayApp {
             });
     }
 
-    fn render_process_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Process Local Replay");
-        ui.separator();
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        if let Some(path) = &self.selected_path {
-                            ui.label("Directory:");
-                            ui.add(egui::Label::new(path.display().to_string()).wrap());
-                        } else {
-                            ui.label("No directory selected");
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.styled_button(ui, "Select Directory").clicked() {
-                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                    self.selected_path = Some(path);
-                                }
-                            }
-                        });
-                    });
-                });
-
-                if !self.is_processing_local && !self.show_completion_dialog {
-                    let can_process = self.selected_path.is_some();
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
-                        if ui.add_enabled(
-                            can_process,
-                            egui::Button::new("Start Processing")
-                                .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
-                        ).clicked() {
-                            self.start_processing();
-                        }
-                    });
-                    if !can_process {
-                        ui.colored_label(ui.style().visuals.error_fg_color, "Please select a directory first");
-                    }
-                }
-
-                if let Ok(progress) = self.progress.lock() {
-                    if let Some(p) = &*progress {
-                        ui.add_space(16.0);
-                        egui::Frame::group(ui.style())
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.spacing_mut().item_spacing.y = 8.0;
-
-                                let progress_bar = |ui: &mut egui::Ui, label, progress| {
-                                    ui.label(label);
-                                    ui.add(egui::ProgressBar::new(progress)
-                                        .show_percentage()
-                                        .animate(true));
-                                };
-
-                                progress_bar(ui, "Header:", p.header.progress());
-                                progress_bar(ui, "Data Chunks:", p.data_chunks.progress());
-                                progress_bar(ui, "Event Chunks:", p.event_chunks.progress());
-                                progress_bar(ui, "Checkpoint Chunks:", p.checkpoint_chunks.progress());
-                            });
-                    }
-                }
-
-                if let Ok(status) = self.status.lock() {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.colored_label(
-                        if status.contains("Error") {
-                            ui.style().visuals.error_fg_color
-                        } else {
-                            ui.style().visuals.text_color()
-                        },
-                        status.as_str()
-                    );
-                }
-            });
+    pub fn show_success(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Success)
     }
 
-    fn render_settings_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.separator();
-        
-        ui.add_space(8.0);
-        
-        // Download directory settings
-        ui.group(|ui| {
-            ui.vertical(|ui| {
-                ui.heading("Download Directory");
-                ui.horizontal(|ui| {
-                    let path_text = self.settings.download_dir.display().to_string();
-                    ui.label("Save replays to:");
-                    ui.add(egui::Label::new(path_text).wrap());
-                    
-                    if self.styled_button(ui, "Browse").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.settings.download_dir = path;
-                            if let Err(err) = self.save_settings() {
-                                self.show_error(format!("Error saving settings: {}", err));
-                            } else {
-                                self.show_success("Settings saved successfully");
-                            }
-                        }
-                    }
-                });
-                
-                ui.add_space(4.0);
-                ui.label("This is where downloaded replays will be saved");
-            });
-        });
-        
-        ui.add_space(16.0);
-        
-        // Auto refresh settings
-        ui.group(|ui| {
-            ui.vertical(|ui| {
-                ui.heading("Auto Refresh");
-                
-                ui.checkbox(&mut self.settings.auto_refresh_enabled, "Enable auto refresh");
-                
-                ui.add_enabled(
-                    self.settings.auto_refresh_enabled,
-                    egui::Slider::new(&mut self.settings.auto_refresh_interval_mins, 1..=60)
-                        .text("Refresh interval (minutes)")
-                        .clamp_to_range(true)  // Use the deprecated method until we can access the new API
-                );
-                
-                ui.add_space(4.0);
-                ui.label("Automatically refresh the replay list at the specified interval");
-            });
-        });
-
-        ui.add_space(16.0);
-
-        // Auto download settings
-        ui.group(|ui| {
-            ui.vertical(|ui| {
-                ui.heading("Auto Download");
-                
-                ui.checkbox(&mut self.settings.auto_download_enabled, "Enable auto download");
-                
-                ui.add_space(4.0);
-                ui.label("User ID trigger:");
-                ui.add_enabled(
-                    self.settings.auto_download_enabled,
-                    egui::TextEdit::singleline(&mut self.settings.auto_download_trigger_user_id)
-                        .hint_text("Enter user ID to auto-download")
-                );
-                
-                ui.add_space(4.0);
-                ui.label("Automatically download replays containing the specified user ID");
-            });
-        });
-        
-        // Apply button
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                if self.styled_button(ui, "Apply").clicked() {
-                    if let Err(err) = self.save_settings() {
-                        self.show_error(format!("Error saving settings: {}", err));
-                    } else {
-                        self.show_success("Settings saved successfully");
-                    }
-                }
-            });
-        });
+    pub fn show_error(&mut self, message: impl Into<String>) {
+        self.show_notification(message.into(), NotificationType::Error)
     }
 
     fn load_settings() -> Result<Settings, Box<dyn std::error::Error>> {
@@ -1166,7 +844,7 @@ impl ReplayApp {
         Ok(settings)
     }
 
-    fn save_settings(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_settings(&self) -> Result<(), Box<dyn std::error::Error>> {
         let settings_dir = Self::get_settings_dir()?;
         fs::create_dir_all(&settings_dir)?;
         
@@ -1208,17 +886,9 @@ impl ReplayApp {
         self.show_notification(message.into(), NotificationType::Info)
     }
     
-    fn show_success(&mut self, message: impl Into<String>) {
-        self.show_notification(message.into(), NotificationType::Success)
-    }
-
     #[allow(dead_code)]
     fn show_warning(&mut self, message: impl Into<String>) {
         self.show_notification(message.into(), NotificationType::Warning)
-    }
-    
-    fn show_error(&mut self, message: impl Into<String>) {
-        self.show_notification(message.into(), NotificationType::Error)
     }
     
     fn update_notifications(&mut self) {
@@ -1285,15 +955,15 @@ impl ReplayApp {
                 .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -bottom_offset))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::new() // Use new() instead of none()
+                    egui::Frame::new() 
                         .fill(bg_color)
-                        .corner_radius(8.0) // Use corner_radius instead of rounding
+                        .corner_radius(8.0) 
                         .shadow(egui::epaint::Shadow {
-                            offset: [0, 2],  // Change from Vec2 to [i8; 2]
-                            blur: 4,         // Change from f32 to u8
-                            spread: 0,       // Change from f32 to u8
-                            color: ctx.style().visuals.window_shadow.color, // Add required color field
-                        }) // Updated shadow
+                            offset: [0, 2],  
+                            blur: 4,         
+                            spread: 0,       
+                            color: ctx.style().visuals.window_shadow.color, 
+                        }) 
                         .show(ui, |ui| {
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
@@ -1313,6 +983,83 @@ impl ReplayApp {
 
 impl App for ReplayApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Check for updates
+        if let Ok(update_info) = self.update_rx.try_recv() {
+            self.update_info = Some(update_info.clone());
+            self.show_info(format!(
+                "New version {} available! You are running {}",
+                update_info.latest_version,
+                update_info.current_version
+            ));
+        }
+        
+        // Show update dialog if we have update info
+        if let Some(update_info) = &self.update_info {
+            let release_url = update_info.release_url.clone();
+            let current_version = update_info.current_version.clone();
+            let latest_version = update_info.latest_version.clone();
+            let release_name = update_info.release_name.clone();
+            let release_date = update_info.release_date.clone();
+            let release_notes = update_info.release_notes.clone();
+            
+            let mut should_close = false;
+            let mut error_message = None;
+            
+            egui::Window::new("Update Available")
+                .collapsible(true)
+                .resizable(true)
+                .default_size([400.0, 300.0])
+                .show(ctx, |ui| {
+                    ui.heading("New Version Available!");
+                    ui.add_space(8.0);
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Current Version:");
+                        ui.strong(current_version);
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Latest Version:");
+                        ui.strong(latest_version);
+                    });
+                    
+                    ui.add_space(8.0);
+                    ui.label(format!("Release: {}", release_name));
+                    ui.label(format!("Released on: {}", release_date));
+                    
+                    ui.add_space(8.0);
+                    ui.label("Release Notes:");
+                    ui.add_space(4.0);
+                    
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            ui.label(&release_notes);
+                        });
+                    
+                    ui.add_space(8.0);
+                    
+                    if ui.button("Download Update").clicked() {
+                        if let Err(err) = open::that(&release_url) {
+                            error_message = Some(format!("Failed to open browser: {}", err));
+                        }
+                    }
+                    
+                    if ui.button("Remind Me Later").clicked() {
+                        should_close = true;
+                    }
+                });
+            
+            // Process results after the UI closure
+            if let Some(err) = error_message {
+                self.show_error(err);
+            }
+            
+            if should_close {
+                self.update_info = None;
+            }
+        }
+        
         // Update notifications
         self.update_notifications();
         
@@ -1395,9 +1142,9 @@ impl App for ReplayApp {
 
         CentralPanel::default().show(ctx, |ui| {
             match self.current_page {
-                Page::Main => self.render_main_page(ui, ctx),
-                Page::ProcessLocal => self.render_process_page(ui),
-                Page::Settings => self.render_settings_page(ui),
+                Page::Main => pages::render_main_page(self, ui, ctx),
+                Page::ProcessLocal => pages::render_process_page(self, ui),
+                Page::Settings => pages::render_settings_page(self, ui),
             }
         });
 
