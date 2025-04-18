@@ -700,6 +700,8 @@ impl ReplayApp {
                 // Platform filter
                 ui.vertical(|ui| {
                     ui.label("Platform:");
+                    let old_platform = self.replay_list.filters.platform;
+                    
                     egui::ComboBox::new(egui::Id::new("platform_filter"), "")
                         .width(field_width)
                         .selected_text(match self.replay_list.filters.platform {
@@ -712,6 +714,11 @@ impl ReplayApp {
                             ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::Quest, "Quest");
                             ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::PC, "PC");
                         });
+                    
+                    if self.replay_list.filters.platform != old_platform {
+                        self.replay_list.current_page = 0;
+                        self.refresh_replays();
+                    }
                 });
             });
         });
@@ -730,7 +737,7 @@ impl ReplayApp {
             .show_rows(ui, replay_item_height, filtered_replays.len(), |ui, row_range| {
                 if filtered_replays.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label("No replays match the current filters");
+                        ui.label("No replays found...");
                     });
                 } else {
                     for row in row_range {
@@ -752,50 +759,56 @@ impl ReplayApp {
                 }
             });
 
-        if self.replay_list.total_pages > 0 {
-            egui::Area::new(egui::Id::new("pagination_controls"))
-                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    egui::Frame::new()
-                        .fill(ctx.style().visuals.window_fill)
-                        .shadow(egui::epaint::Shadow {
-                            offset: [0, 4],
-                            blur: 8,
-                            spread: 0,
-                            color: ctx.style().visuals.window_shadow.color,
-                        })
-                        .corner_radius(5.0)
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                if ui.add_enabled(
-                                    self.replay_list.current_page > 0,
-                                    egui::Button::new("<")
-                                        .min_size(egui::vec2(32.0, 32.0))
-                                ).clicked() {
-                                    self.replay_list.current_page -= 1;
-                                    self.refresh_replays();
-                                }
-                                
-                                ui.label(format!("Page {} of {}",
-                                    self.replay_list.current_page + 1,
-                                    self.replay_list.total_pages.max(1)
-                                ));
-                                
-                                if ui.add_enabled(
-                                    self.replay_list.current_page < self.replay_list.total_pages - 1,
-                                    egui::Button::new(">")
-                                        .min_size(egui::vec2(32.0, 32.0))
-                                ).clicked() {
-                                    self.replay_list.current_page += 1;
-                                    self.refresh_replays();
-                                }
+            if self.replay_list.total_pages > 0 {
+                egui::Area::new(egui::Id::new("pagination_controls"))
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(ctx.style().visuals.window_fill)
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 4],
+                                blur: 8,
+                                spread: 0,
+                                color: ctx.style().visuals.window_shadow.color,
+                            })
+                            .corner_radius(5.0)
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(
+                                        self.replay_list.current_page > 0,
+                                        egui::Button::new("<")
+                                            .min_size(egui::vec2(32.0, 32.0))
+                                    ).clicked() {
+                                        self.replay_list.current_page -= 1;
+                                        self.refresh_replays();
+                                        ctx.memory_mut(|mem| {
+                                            mem.data.clear();
+                                        });
+                                    }
+                                    
+                                    ui.label(format!("Page {} of {}",
+                                        self.replay_list.current_page + 1,
+                                        self.replay_list.total_pages.max(1)
+                                    ));
+                                    
+                                    if ui.add_enabled(
+                                        self.replay_list.current_page < self.replay_list.total_pages - 1,
+                                        egui::Button::new(">")
+                                            .min_size(egui::vec2(32.0, 32.0))
+                                    ).clicked() {
+                                        self.replay_list.current_page += 1;
+                                        self.refresh_replays();
+                                        ctx.memory_mut(|mem| {
+                                            mem.data.clear();
+                                        });
+                                    }
+                                });
                             });
-                        });
-                });
+                    });
+            }
         }
-    }
 
     fn render_replay_item_with_width(
         &mut self,
