@@ -740,9 +740,14 @@ impl ReplayApp {
                             egui::Sense::hover(),
                         );
                         let rect = rect.translate(egui::vec2(horizontal_margin, 0.0));
-                        ui.allocate_ui_at_rect(rect, |ui| {
-                            self.render_replay_item_with_width(ui, ctx, replay, rect.width());
-                        });
+                        ui.allocate_new_ui(
+                            egui::UiBuilder::new()
+                                .max_rect(rect)  
+                                .layout(egui::Layout::top_down(egui::Align::Center)),
+                            |ui| {
+                                self.render_replay_item_with_width(ui, ctx, replay, rect.width());
+                            },
+                        );
                     }
                 }
             });
@@ -896,32 +901,38 @@ impl ReplayApp {
                 egui::Sense::hover(),
             );
 
-            ui.allocate_ui_at_rect(rect, |ui| {
-                egui::ScrollArea::horizontal()
-                    .max_height(avatar_row_height)
-                    .show(ui, |ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            if replay.users.is_empty() {
-                                let (avatar_rect, _) = ui.allocate_exact_size(avatar_size, egui::Sense::hover());
-                                ui.painter().rect_filled(avatar_rect, 8.0, egui::Color32::DARK_GRAY);
-                                ui.painter().text(
-                                    avatar_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "No Users",
-                                    egui::FontId::proportional(14.0),
-                                    egui::Color32::WHITE,
-                                );
-                            } else {
-                                for (idx, user) in replay.users.iter().enumerate() {
-                                    ui.push_id(idx, |ui| {
-                                        self.render_user_avatar(ui, ctx, user);
-                                    });
+            ui.allocate_new_ui(
+                // Build the region you want:
+                egui::UiBuilder::new()
+                    .max_rect(rect)  // your allocated rectangle
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    egui::ScrollArea::horizontal()
+                        .max_height(avatar_row_height)
+                        .show(ui, |ui| {
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                if replay.users.is_empty() {
+                                    let (avatar_rect, _) = ui.allocate_exact_size(avatar_size, egui::Sense::hover());
+                                    ui.painter().rect_filled(avatar_rect, 8.0, egui::Color32::DARK_GRAY);
+                                    ui.painter().text(
+                                        avatar_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "No Users",
+                                        egui::FontId::proportional(14.0),
+                                        egui::Color32::WHITE,
+                                    );
+                                } else {
+                                    for (idx, user) in replay.users.iter().enumerate() {
+                                        ui.push_id(idx, |ui| {
+                                            self.render_user_avatar(ui, ctx, user);
+                                        });
+                                    }
                                 }
-                            }
+                            });
                         });
-                    });
-            });
+                },
+            );
         });
     }
 
@@ -1109,7 +1120,8 @@ impl ReplayApp {
                     self.settings.auto_refresh_enabled,
                     egui::Slider::new(&mut self.settings.auto_refresh_interval_mins, 1..=60)
                         .text("Refresh interval (minutes)")
-                        .clamp_to_range(true)  // Use the deprecated method until we can access the new API
+                        .clamping(egui::SliderClamping::Always)
+
                 );
                 
                 ui.add_space(4.0);
