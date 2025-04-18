@@ -23,18 +23,16 @@ fn main() -> eframe::Result<()> {
                 width: icon_width,
                 height: icon_height,
             }),
-        default_theme: eframe::Theme::Dark,
-        follow_system_theme: true,
         centered: true,
         renderer: eframe::Renderer::Glow,
         vsync: true,
-        multisampling: 4,
+        multisampling: 2,
         ..Default::default()
     };
-
+    
     run_native(
         "Pavlov Replay Toolbox",
         native_options,
-        Box::new(|cc| Box::new(app::ReplayApp::new(cc))),
+        Box::new(|cc| Ok(Box::new(app::ReplayApp::new(cc)))),
     )
 }

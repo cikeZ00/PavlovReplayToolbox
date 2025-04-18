@@ -681,7 +681,7 @@ impl ReplayApp {
                              .hint_text("Filter"));
                 
                 ui.label("Platform:");
-                egui::ComboBox::from_id_source("platform_filter")
+                egui::ComboBox::new(egui::Id::new("platform_filter"), "") // Use new with Id instead of from_id_source
                     .selected_text(match self.replay_list.filters.platform {
                         PlatformFilter::All => "All",
                         PlatformFilter::Quest => "Quest",
@@ -714,14 +714,19 @@ impl ReplayApp {
             });
             
         if self.replay_list.total_pages > 0 {
-            egui::Area::new("pagination_controls")
+            egui::Area::new(egui::Id::new("pagination_controls"))
                 .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(ctx.style().visuals.window_fill)
-                        .shadow(egui::epaint::Shadow::small_dark())
-                        .rounding(5.0)
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 4],  // Change from Vec2 to [i8; 2]
+                            blur: 8,         // Change from f32 to u8
+                            spread: 0,       // Change from f32 to u8
+                            color: ctx.style().visuals.window_shadow.color, // Add required color field
+                        })
+                        .corner_radius(5.0)
                         .inner_margin(8.0)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -755,8 +760,8 @@ impl ReplayApp {
 
     fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &Context, replay: &ReplayItem) {
         ui.push_id(replay.id.as_str(), |ui| {
-            egui::Frame::none()
-                .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
+            egui::Frame::new()
+                .outer_margin(8.0) // Use f32 directly
                 .show(ui, |ui| {
                     egui::Frame::group(ui.style())
                         .fill(ui.style().visuals.extreme_bg_color)
@@ -811,7 +816,7 @@ impl ReplayApp {
                                 ui.separator();
     
                                 egui::ScrollArea::horizontal()
-                                    .id_source(format!("scroll_{}", replay.id))
+                                    .id_salt(format!("scroll_{}", replay.id)) // Use id_salt instead of id_source
                                     .max_height(72.0)
                                     .show(ui, |ui| {
                                         ui.vertical_centered(|ui| {
@@ -834,10 +839,10 @@ impl ReplayApp {
     fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &Context, user: &str) {
         let avatar_size = egui::vec2(64.0, 64.0);
         
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.style().visuals.window_fill)
-            .inner_margin(egui::style::Margin::same(0.0))
-            .outer_margin(egui::style::Margin::same(0.0))
+            .inner_margin(0.0)
+            .outer_margin(0.0)
             .show(ui, |ui| {
                 ui.set_min_size(avatar_size);
                 ui.set_max_size(avatar_size);
@@ -853,9 +858,7 @@ impl ReplayApp {
                         );
                         
                         if btn_response.clicked() {
-                            ctx.output_mut(|out| {
-                                out.copied_text = user.to_string();
-                            });
+                            ctx.copy_text(user.to_string());
                         }
                         
                         response = Some(btn_response);
@@ -865,9 +868,7 @@ impl ReplayApp {
                         let btn_response = ui.add_sized(avatar_size, egui::Button::new("Loading"));
                         
                         if btn_response.clicked() {
-                            ctx.output_mut(|out| {
-                                out.copied_text = user.to_string();
-                            });
+                            ctx.copy_text(user.to_string());
                         }
                         
                         response = Some(btn_response);
@@ -883,8 +884,9 @@ impl ReplayApp {
                         let rect = resp.rect;
                         ui.painter().rect_stroke(
                             rect.expand(2.0), 
-                            4.0,
-                            egui::Stroke::new(2.0, ui.style().visuals.selection.bg_fill)
+                            egui::epaint::CornerRadius::ZERO,
+                            egui::Stroke::new(2.0, ui.style().visuals.selection.bg_fill),
+                            egui::epaint::StrokeKind::Outside,
                         );
                         
                         resp.on_hover_text(user);
@@ -904,8 +906,7 @@ impl ReplayApp {
                     ui.horizontal(|ui| {
                         if let Some(path) = &self.selected_path {
                             ui.label("Directory:");
-                            ui.add(egui::Label::new(path.display().to_string())
-                                .wrap(true));
+                            ui.add(egui::Label::new(path.display().to_string()).wrap());
                         } else {
                             ui.label("No directory selected");
                         }
@@ -987,7 +988,7 @@ impl ReplayApp {
                 ui.horizontal(|ui| {
                     let path_text = self.settings.download_dir.display().to_string();
                     ui.label("Save replays to:");
-                    ui.add(egui::Label::new(path_text).wrap(true));
+                    ui.add(egui::Label::new(path_text).wrap());
                     
                     if self.styled_button(ui, "Browse").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -1019,7 +1020,7 @@ impl ReplayApp {
                     self.settings.auto_refresh_enabled,
                     egui::Slider::new(&mut self.settings.auto_refresh_interval_mins, 1..=60)
                         .text("Refresh interval (minutes)")
-                        .clamp_to_range(true)
+                        .clamp_to_range(true)  // Use the deprecated method until we can access the new API
                 );
                 
                 ui.add_space(4.0);
@@ -1191,14 +1192,19 @@ impl ReplayApp {
             };
             
             // Render notification
-            egui::Area::new(format!("notification_{}", notification.id))
+            egui::Area::new(egui::Id::new(format!("notification_{}", notification.id)))
                 .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -bottom_offset))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::new() // Use new() instead of none()
                         .fill(bg_color)
-                        .rounding(8.0)
-                        .shadow(egui::epaint::Shadow::small_light())
+                        .corner_radius(8.0) // Use corner_radius instead of rounding
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 2],  // Change from Vec2 to [i8; 2]
+                            blur: 4,         // Change from f32 to u8
+                            spread: 0,       // Change from f32 to u8
+                            color: ctx.style().visuals.window_shadow.color, // Add required color field
+                        }) // Updated shadow
                         .show(ui, |ui| {
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {

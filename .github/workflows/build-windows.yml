@@ -23,6 +23,13 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Extract version from Cargo.toml
+        id: get_version
+        shell: powershell
+        run: |
+          $version = (Get-Content -Path Cargo.toml | Select-String -Pattern '^version = "([^"]*)"').Matches.Groups[1].Value
+          echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Build release binary
         run: cargo build --release
 
@@ -36,8 +43,8 @@ jobs:
         id: create_release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ github.run_number }}"
-          name: "Release v${{ github.run_number }}"
+          tag_name: "v${{ steps.get_version.outputs.version }}"
+          name: "Release v${{ steps.get_version.outputs.version }}"
           body: "Release generated from commit ${{ github.sha }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,7 +52,7 @@ jobs:
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ github.run_number }}"
+          tag_name: "v${{ steps.get_version.outputs.version }}"
           files: target/release/PavlovReplayToolbox.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
