@@ -410,52 +410,46 @@ impl ReplayApp {
                 }
             };
 
-            let total_steps = 5;
-            let mut current_step = 0;
-
-            let update_progress = |current: usize, max: usize, is_build: bool| {
-                if let Ok(mut progress) = progress_clone.lock() {
-                    let _progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
-                    if let Some(p) = progress.as_mut() {
-                        if is_build {
-                            p.build.current = current;
-                            p.build.max = max;
-                        } else {
-                            p.download.current = current;
-                            p.download.max = max;
-                        }
-                    }
-                }
-            };
-
+            // Initialize progress tracking
             if let Ok(mut progress) = progress_clone.lock() {
                 *progress = Some(DownloadProgress::default());
             }
 
+            let download_progress_callback = {
+                let progress_clone = Arc::clone(&progress_clone);
+                Box::new(move |current: usize, total: usize| {
+                    if let Ok(mut progress) = progress_clone.lock() {
+                        if let Some(p) = progress.as_mut() {
+                            p.download.current = current;
+                            p.download.max = total;
+                        }
+                    }
+                }) as Box<dyn Fn(usize, usize) + Send + Sync>
+            };
+
             let result: Result<(), Box<dyn std::error::Error>> = (|| {
-                update_progress(current_step, total_steps, false);
-
-                for step in 0..total_steps {
-                    current_step = step;
-                    update_progress(current_step, total_steps, false);
-                    thread::sleep(Duration::from_millis(100));
-                }
-
-                let replay_data = match download_replay(&replay_id_clone) {
+                let replay_data = match download_replay(&replay_id_clone, Some(download_progress_callback)) {
                     Ok(data) => data,
                     Err(e) => return Err(format!("Failed to download replay data: {}", e).into())
                 };
 
-                update_progress(0, 100, true);
-                for i in 0..100 {
-                    thread::sleep(Duration::from_millis(10));
-                    update_progress(i + 1, 100, true);
-                }
+                let update_build_progress = |current: usize, max: usize| {
+                    if let Ok(mut progress) = progress_clone.lock() {
+                        if let Some(p) = progress.as_mut() {
+                            p.build.current = current;
+                            p.build.max = max;
+                        }
+                    }
+                };
+
+                update_build_progress(0, 100);
 
                 let metadata_result = match client
                     .get(&format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
                     .send() {
                         Ok(resp) => {
+                            update_build_progress(10, 100);
+                            
                             if !resp.status().is_success() {
                                 return Err(format!(
                                     "Failed to fetch replay metadata: Server returned {} - {}", 
@@ -465,7 +459,10 @@ impl ReplayApp {
                             }
                             
                             match resp.json::<MetaData>() {
-                                Ok(data) => data,
+                                Ok(data) => {
+                                    update_build_progress(20, 100);
+                                    data
+                                },
                                 Err(e) => return Err(format!(
                                     "Failed to parse replay metadata: {}. The API format may have changed.", e
                                 ).into())
@@ -482,6 +479,8 @@ impl ReplayApp {
                         }
                     };
 
+                update_build_progress(30, 100);
+
                 let created_datetime = match chrono::DateTime::parse_from_rfc3339(&metadata_result.created)
                     .or_else(|_| -> Result<_, Box<dyn std::error::Error>> {
                         let ts = metadata_result.created
@@ -491,9 +490,14 @@ impl ReplayApp {
                             .map(|dt| dt.fixed_offset())
                             .ok_or_else(|| "Invalid timestamp".into())
                     }) {
-                        Ok(dt) => dt,
+                        Ok(dt) => {
+                            update_build_progress(40, 100);
+                            dt
+                        },
                         Err(e) => return Err(format!("Failed to parse replay date: {}", e).into())
                     };
+
+                update_build_progress(50, 100);
 
                 let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
                 let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
@@ -504,10 +508,16 @@ impl ReplayApp {
                     formatted_date,
                     replay_id_clone
                 );
-                let output_path = download_dir.join(filename);
 
+                update_build_progress(75, 100);
+                
+                let output_path = download_dir.join(filename);
+                update_build_progress(90, 100);
+                
                 match fs::write(output_path, replay_data) {
-                    Ok(_) => {},
+                    Ok(_) => {
+                        update_build_progress(100, 100);
+                    },
                     Err(e) => return Err(format!("Failed to save replay file: {}", e).into())
                 }
 
