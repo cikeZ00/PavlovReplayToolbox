@@ -7,12 +7,8 @@ pub struct ReplayBuffer {
 
 impl ReplayBuffer {
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut buffer = vec![0u8; capacity];
+        let buffer = vec![0u8; capacity];
         Self { buffer, pos: 0 }
-    }
-
-    pub fn offset(&self) -> usize {
-        self.pos
     }
 
     pub fn write_int32(&mut self, value: i32) -> Result<(), Box<dyn Error>> {

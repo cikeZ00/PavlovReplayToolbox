@@ -1,6 +1,6 @@
 use crate::tools::replay_buffer::ReplayBuffer;
 use crate::tools::replay_processor::MetaData;
-use chrono::{DateTime, FixedOffset, TimeZone};
+use chrono::{DateTime, FixedOffset};
 use std::error::Error;
 
 const FRIENDLY_NAME_SIZE: usize = 514;

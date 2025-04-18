@@ -1,10 +1,10 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -26,14 +26,14 @@ enum NotificationType {
     Error,
 }
 
-use serde::{Serialize, Deserialize};
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{App, CreationContext};
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 
 use crate::tools::replay_processor::{
-    download_replay, process_replay, Config, Progress, ProgressUpdate, DownloadProgress,
-    ReplayItem, ApiResponse, ApiReplay, MetaData, API_BASE_URL,
+    download_replay, process_replay, ApiResponse, Config, DownloadProgress,
+    MetaData, Progress, ReplayItem, API_BASE_URL,
 };
 
 type DownloadedReplaysSender = std::sync::mpsc::Sender<String>;
@@ -122,7 +122,7 @@ pub struct ReplayApp {
 }
 
 impl ReplayApp {
-    pub fn new(cc: &CreationContext<'_>) -> Self {
+    pub fn new(_cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
         let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
 
@@ -147,7 +147,7 @@ impl ReplayApp {
             downloaded_tx,
             downloaded_rx,
             settings,
-            last_refresh_time: std::time::Instant::now(),
+            last_refresh_time: Instant::now(),
             notifications: Vec::new(),
             next_notification_id: 0,
         };
@@ -245,12 +245,12 @@ impl ReplayApp {
                 resp
             },
             Err(e) => {
-                if e.is_timeout() {
-                    return Err("Connection timed out. Server may be down or unreachable.".into());
+                return if e.is_timeout() {
+                    Err("Connection timed out. Server may be down or unreachable.".into())
                 } else if e.is_connect() {
-                    return Err("Failed to connect to server. Please check your internet connection.".into());
+                    Err("Failed to connect to server. Please check your internet connection.".into())
                 } else {
-                    return Err(format!("Network error: {}", e).into());
+                    Err(format!("Network error: {}", e).into())
                 }
             }
         };
@@ -292,7 +292,7 @@ impl ReplayApp {
                     *status = "Replays loaded successfully".to_string();
                 }
                 self.show_success("Replays loaded successfully");
-                self.last_refresh_time = std::time::Instant::now();
+                self.last_refresh_time = Instant::now();
                 
                 // Check for auto-download triggers after refreshing
                 self.check_auto_download_triggers();
@@ -414,7 +414,7 @@ impl ReplayApp {
 
             let update_progress = |current: usize, max: usize, is_build: bool| {
                 if let Ok(mut progress) = progress_clone.lock() {
-                    let progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
+                    let _progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
                     if let Some(p) = progress.as_mut() {
                         if is_build {
                             p.build.current = current;
@@ -471,12 +471,12 @@ impl ReplayApp {
                             }
                         },
                         Err(e) => {
-                            if e.is_timeout() {
-                                return Err("Connection timed out while fetching replay metadata.".into());
+                            return if e.is_timeout() {
+                                Err("Connection timed out while fetching replay metadata.".into())
                             } else if e.is_connect() {
-                                return Err("Failed to connect to metadata server. Please check your internet connection.".into());
+                                Err("Failed to connect to metadata server. Please check your internet connection.".into())
                             } else {
-                                return Err(format!("Network error retrieving metadata: {}", e).into());
+                                Err(format!("Network error retrieving metadata: {}", e).into())
                             }
                         }
                     };
@@ -532,7 +532,7 @@ impl ReplayApp {
     }
 
     fn check_downloaded_replays(&mut self) {
-        if let Ok(entries) = std::fs::read_dir(std::env::current_dir().unwrap_or_default()) {
+        if let Ok(entries) = fs::read_dir(std::env::current_dir().unwrap_or_default()) {
             for entry in entries.flatten() {
                 if let Ok(file_type) = entry.file_type() {
                     if file_type.is_file() {
@@ -548,7 +548,7 @@ impl ReplayApp {
                                             }
                                         }
 
-                                        if let Ok(mut file) = std::fs::File::open(entry.path()) {
+                                        if let Ok(mut file) = fs::File::open(entry.path()) {
                                             let mut buffer = [0; 1024];
                                             if file.read(&mut buffer).is_ok() {
                                                 let content = String::from_utf8_lossy(&buffer);
@@ -572,7 +572,7 @@ impl ReplayApp {
     }
 
     fn render_download_progress(&mut self, ctx: &Context) {
-        if let Some(replay_id) = &self.downloading_replay_id {
+        if let Some(_replay_id) = &self.downloading_replay_id {
             if let Ok(progress) = self.download_progress.lock() {
                 if let Some(p) = &*progress {
                     egui::Window::new("Downloading Replay")
@@ -645,7 +645,7 @@ impl ReplayApp {
             .collect()
     }
 
-    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &Context) {
         ui.horizontal(|ui| {
             ui.heading("Available Replays");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -752,7 +752,7 @@ impl ReplayApp {
         }
     }
 
-    fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, replay: &ReplayItem) {
+    fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &Context, replay: &ReplayItem) {
         ui.push_id(replay.id.as_str(), |ui| {
             egui::Frame::none()
                 .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
@@ -830,7 +830,7 @@ impl ReplayApp {
         });
     }
 
-    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, user: &str) {
+    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &Context, user: &str) {
         let avatar_size = egui::vec2(64.0, 64.0);
         
         egui::Frame::none()
@@ -1087,7 +1087,7 @@ impl ReplayApp {
     }
 
     fn get_settings_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let mut path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "PavlovVR", "ReplayToolbox") {
+        let path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "PavlovVR", "ReplayToolbox") {
             proj_dirs.config_dir().to_path_buf()
         } else {
             let mut path = std::env::current_dir()?;
@@ -1151,7 +1151,7 @@ impl ReplayApp {
         f * f * f + 1.0
     }
 
-    fn render_notifications(&self, ctx: &egui::Context) {
+    fn render_notifications(&self, ctx: &Context) {
         let notification_height = 40.0;
         let notification_spacing = 8.0;
         let max_visible = 5;
