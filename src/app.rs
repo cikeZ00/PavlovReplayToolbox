@@ -27,6 +27,25 @@ enum NotificationType {
     Error,
 }
 
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    name: String,
+    body: Option<String>,
+    published_at: String,
+}
+
+#[derive(Clone)]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    release_url: String,
+    release_name: String,
+    release_date: String,
+    release_notes: String,
+}
+
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{App, CreationContext};
 use reqwest::blocking::Client;
@@ -41,6 +60,7 @@ use crate::pages;
 
 type DownloadedReplaysSender = std::sync::mpsc::Sender<String>;
 type DownloadedReplaysReceiver = std::sync::mpsc::Receiver<String>;
+type UpdateInfoReceiver = std::sync::mpsc::Receiver<UpdateInfo>;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -122,12 +142,15 @@ pub struct ReplayApp {
     last_refresh_time: Instant,
     notifications: Vec<Notification>,
     next_notification_id: u64,
+    update_info: Option<UpdateInfo>,
+    update_rx: UpdateInfoReceiver,
 }
 
 impl ReplayApp {
     pub fn new(_cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
         let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
 
         let settings = Self::load_settings().unwrap_or_default();
 
@@ -153,9 +176,94 @@ impl ReplayApp {
             last_refresh_time: Instant::now(),
             notifications: Vec::new(),
             next_notification_id: 0,
+            update_info: None,
+            update_rx,
         };
         app.refresh_replays();
         app.check_downloaded_replays();
+
+        // Start update check
+        let update_tx_clone = update_tx.clone();
+        thread::spawn(move || {
+            let current_version = env!("CARGO_PKG_VERSION");
+            
+            let client = match Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build() {
+                    Ok(client) => client,
+                    Err(_) => return,
+                };
+                
+            let url = "https://api.github.com/repos/cikeZ00/PavlovReplayToolbox/releases/latest";
+            
+            let response = match client.get(url)
+                .header("User-Agent", "PavlovReplayToolbox")
+                .send() {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            return;
+                        }
+                        resp
+                    },
+                    Err(_) => return,
+                };
+                
+            let github_release: GitHubRelease = match response.json() {
+                Ok(release) => release,
+                Err(_) => return,
+            };
+            
+            // Remove 'v' prefix if present
+            let latest_version = github_release.tag_name.trim_start_matches('v').to_string();
+            
+            // Compare versions
+            let current_segments: Vec<u32> = current_version
+                .split('.')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+                
+            let latest_segments: Vec<u32> = latest_version
+                .split('.')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+                
+            let update_available = if current_segments.len() == latest_segments.len() {
+                let mut is_newer = false;
+                for i in 0..current_segments.len() {
+                    if latest_segments[i] > current_segments[i] {
+                        is_newer = true;
+                        break;
+                    } else if latest_segments[i] < current_segments[i] {
+                        break;
+                    }
+                }
+                is_newer
+            } else {
+                // Simple fallback - just check if they're different
+                current_version != latest_version
+            };
+            
+            if update_available {
+                let update_info = UpdateInfo {
+                    current_version: current_version.to_string(),
+                    latest_version,
+                    release_url: github_release.html_url,
+                    release_name: github_release.name,
+                    release_date: github_release.published_at
+                        .split('T')
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                    release_notes: github_release.body.unwrap_or_default()
+                        .lines()
+                        .take(10)
+                        .collect::<Vec<&str>>()
+                        .join("\n"),
+                };
+                let _ = update_tx_clone.send(update_info);
+            }
+        });
+
         app
     }
 
@@ -875,6 +983,83 @@ impl ReplayApp {
 
 impl App for ReplayApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Check for updates
+        if let Ok(update_info) = self.update_rx.try_recv() {
+            self.update_info = Some(update_info.clone());
+            self.show_info(format!(
+                "New version {} available! You are running {}",
+                update_info.latest_version,
+                update_info.current_version
+            ));
+        }
+        
+        // Show update dialog if we have update info
+        if let Some(update_info) = &self.update_info {
+            let release_url = update_info.release_url.clone();
+            let current_version = update_info.current_version.clone();
+            let latest_version = update_info.latest_version.clone();
+            let release_name = update_info.release_name.clone();
+            let release_date = update_info.release_date.clone();
+            let release_notes = update_info.release_notes.clone();
+            
+            let mut should_close = false;
+            let mut error_message = None;
+            
+            egui::Window::new("Update Available")
+                .collapsible(true)
+                .resizable(true)
+                .default_size([400.0, 300.0])
+                .show(ctx, |ui| {
+                    ui.heading("New Version Available!");
+                    ui.add_space(8.0);
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Current Version:");
+                        ui.strong(current_version);
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Latest Version:");
+                        ui.strong(latest_version);
+                    });
+                    
+                    ui.add_space(8.0);
+                    ui.label(format!("Release: {}", release_name));
+                    ui.label(format!("Released on: {}", release_date));
+                    
+                    ui.add_space(8.0);
+                    ui.label("Release Notes:");
+                    ui.add_space(4.0);
+                    
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            ui.label(&release_notes);
+                        });
+                    
+                    ui.add_space(8.0);
+                    
+                    if ui.button("Download Update").clicked() {
+                        if let Err(err) = open::that(&release_url) {
+                            error_message = Some(format!("Failed to open browser: {}", err));
+                        }
+                    }
+                    
+                    if ui.button("Remind Me Later").clicked() {
+                        should_close = true;
+                    }
+                });
+            
+            // Process results after the UI closure
+            if let Some(err) = error_message {
+                self.show_error(err);
+            }
+            
+            if should_close {
+                self.update_info = None;
+            }
+        }
+        
         // Update notifications
         self.update_notifications();
         

@@ -5,7 +5,7 @@ use crate::tools::replay_processor::ReplayItem;
 
 pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
     ui.horizontal(|ui| {
-        ui.heading("Available Replays");
+        ui.heading("Replay Downloader");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.styled_button(ui, "Refresh").clicked() {
                 app.refresh_replays();
@@ -79,7 +79,6 @@ pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
             });
         });
     });
-    ui.separator();
 
     let filtered_replays = app.get_filtered_replays();
 
