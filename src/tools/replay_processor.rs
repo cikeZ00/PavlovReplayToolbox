@@ -1,17 +1,17 @@
+use chrono::DateTime;
+use rayon::prelude::*;
+use reqwest::blocking::{Client, Response};
+use serde::{Deserialize, Serialize};
 use std::{
+    error::Error,
     fs,
     path::{Path, PathBuf},
-    error::Error,
     thread::sleep,
     time::Duration,
 };
-use serde::{Deserialize, Serialize};
-use reqwest::blocking::{Client, Response};
-use chrono::DateTime;
-use rayon::prelude::*;
 
-use crate::tools::build_meta::{self, build_meta};
-use crate::tools::build_replay::{self, build_replay, ReplayPart};
+use crate::tools::build_meta::build_meta;
+use crate::tools::build_replay::{build_replay, ReplayPart};
 
 pub const API_BASE_URL: &str = "https://tv.vankrupt.net";
 
@@ -54,10 +54,14 @@ pub struct ReplayItem {
     pub map_name: String,
     pub created_date: String,
     pub time_since: i32,
+    #[allow(dead_code)]
     pub competitive: bool,
+    #[allow(dead_code)]
     pub modcount: i32,
+    #[allow(dead_code)]
     pub shack: bool,
     pub workshop_mods: String,
+    #[allow(dead_code)]
     pub live: bool,
     pub users: Vec<String>,
 }
@@ -358,12 +362,12 @@ pub fn download_replay(replay_id: &str) -> Result<Vec<u8>, Box<dyn Error + Send 
 
     // Build the replay by first constructing the meta buffer and then appending each chunk.
     let meta_buffer = build_meta(&meta)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+        .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })?;
     let mut parts = vec![ReplayPart::Meta(meta_buffer)];
     parts.extend(download_chunks.into_iter().map(ReplayPart::Chunk));
     
     build_replay(&parts)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+        .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })
 }
 
 
@@ -375,7 +379,7 @@ pub fn replay_chunks_dir() -> PathBuf {
     exe_dir.join("replay_chunks")
 }
 
-pub fn load_json_file<T: for<'de> Deserialize<'de>>(file_path: &Path, file_name: &str) -> Result<T, Box<dyn std::error::Error>> {
+pub fn load_json_file<T: for<'de> Deserialize<'de>>(file_path: &Path, file_name: &str) -> Result<T, Box<dyn Error>> {
     if !file_path.exists() {
         return Err(format!("{} file not found at {:?}", file_name, file_path).into());
     }
@@ -384,14 +388,14 @@ pub fn load_json_file<T: for<'de> Deserialize<'de>>(file_path: &Path, file_name:
     Ok(parsed)
 }
 
-pub fn load_chunk_file(file_path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn load_chunk_file(file_path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     if !file_path.exists() {
         return Err(format!("Chunk file not found: {:?}", file_path).into());
     }
     Ok(fs::read(file_path)?)
 }
 
-pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn Error>> {
     let config = config.unwrap_or_default();
     let chunks_dir = replay_chunks_dir();
     let metadata_path = chunks_dir.join("metadata.json");
@@ -406,7 +410,6 @@ pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn std::er
 
     let update_callback = &config.update_callback;
     let mut download_chunks: Vec<Chunk> = Vec::new();
-    let mut progress = Progress::default();
 
     let pavlov_events = metadata_file
         .events_pavlov
@@ -448,7 +451,7 @@ pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn std::er
     });
 
     // Initialize progress
-    progress = Progress {
+    let mut progress = Progress {
         header: ProgressUpdate { current: 0, max: 1 },
         data_chunks: ProgressUpdate {
             current: 0,

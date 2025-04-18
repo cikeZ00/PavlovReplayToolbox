@@ -1,10 +1,10 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -22,18 +22,19 @@ struct Notification {
 enum NotificationType {
     Info,
     Success,
+    #[allow(dead_code)]
     Warning,
     Error,
 }
 
-use serde::{Serialize, Deserialize};
 use eframe::egui::{self, CentralPanel, Context};
 use eframe::{App, CreationContext};
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 
 use crate::tools::replay_processor::{
-    download_replay, process_replay, Config, Progress, ProgressUpdate, DownloadProgress,
-    ReplayItem, ApiResponse, ApiReplay, MetaData, API_BASE_URL,
+    download_replay, process_replay, ApiResponse, Config, DownloadProgress,
+    MetaData, Progress, ReplayItem, API_BASE_URL,
 };
 
 type DownloadedReplaysSender = std::sync::mpsc::Sender<String>;
@@ -122,7 +123,7 @@ pub struct ReplayApp {
 }
 
 impl ReplayApp {
-    pub fn new(cc: &CreationContext<'_>) -> Self {
+    pub fn new(_cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
         let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
 
@@ -147,7 +148,7 @@ impl ReplayApp {
             downloaded_tx,
             downloaded_rx,
             settings,
-            last_refresh_time: std::time::Instant::now(),
+            last_refresh_time: Instant::now(),
             notifications: Vec::new(),
             next_notification_id: 0,
         };
@@ -245,12 +246,12 @@ impl ReplayApp {
                 resp
             },
             Err(e) => {
-                if e.is_timeout() {
-                    return Err("Connection timed out. Server may be down or unreachable.".into());
+                return if e.is_timeout() {
+                    Err("Connection timed out. Server may be down or unreachable.".into())
                 } else if e.is_connect() {
-                    return Err("Failed to connect to server. Please check your internet connection.".into());
+                    Err("Failed to connect to server. Please check your internet connection.".into())
                 } else {
-                    return Err(format!("Network error: {}", e).into());
+                    Err(format!("Network error: {}", e).into())
                 }
             }
         };
@@ -292,7 +293,7 @@ impl ReplayApp {
                     *status = "Replays loaded successfully".to_string();
                 }
                 self.show_success("Replays loaded successfully");
-                self.last_refresh_time = std::time::Instant::now();
+                self.last_refresh_time = Instant::now();
                 
                 // Check for auto-download triggers after refreshing
                 self.check_auto_download_triggers();
@@ -414,7 +415,7 @@ impl ReplayApp {
 
             let update_progress = |current: usize, max: usize, is_build: bool| {
                 if let Ok(mut progress) = progress_clone.lock() {
-                    let progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
+                    let _progress_val = if max == 0 { 0.0 } else { current as f32 / max as f32 };
                     if let Some(p) = progress.as_mut() {
                         if is_build {
                             p.build.current = current;
@@ -471,12 +472,12 @@ impl ReplayApp {
                             }
                         },
                         Err(e) => {
-                            if e.is_timeout() {
-                                return Err("Connection timed out while fetching replay metadata.".into());
+                            return if e.is_timeout() {
+                                Err("Connection timed out while fetching replay metadata.".into())
                             } else if e.is_connect() {
-                                return Err("Failed to connect to metadata server. Please check your internet connection.".into());
+                                Err("Failed to connect to metadata server. Please check your internet connection.".into())
                             } else {
-                                return Err(format!("Network error retrieving metadata: {}", e).into());
+                                Err(format!("Network error retrieving metadata: {}", e).into())
                             }
                         }
                     };
@@ -532,7 +533,7 @@ impl ReplayApp {
     }
 
     fn check_downloaded_replays(&mut self) {
-        if let Ok(entries) = std::fs::read_dir(std::env::current_dir().unwrap_or_default()) {
+        if let Ok(entries) = fs::read_dir(std::env::current_dir().unwrap_or_default()) {
             for entry in entries.flatten() {
                 if let Ok(file_type) = entry.file_type() {
                     if file_type.is_file() {
@@ -548,7 +549,7 @@ impl ReplayApp {
                                             }
                                         }
 
-                                        if let Ok(mut file) = std::fs::File::open(entry.path()) {
+                                        if let Ok(mut file) = fs::File::open(entry.path()) {
                                             let mut buffer = [0; 1024];
                                             if file.read(&mut buffer).is_ok() {
                                                 let content = String::from_utf8_lossy(&buffer);
@@ -572,7 +573,7 @@ impl ReplayApp {
     }
 
     fn render_download_progress(&mut self, ctx: &Context) {
-        if let Some(replay_id) = &self.downloading_replay_id {
+        if let Some(_replay_id) = &self.downloading_replay_id {
             if let Ok(progress) = self.download_progress.lock() {
                 if let Some(p) = &*progress {
                     egui::Window::new("Downloading Replay")
@@ -645,7 +646,7 @@ impl ReplayApp {
             .collect()
     }
 
-    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn render_main_page(&mut self, ui: &mut egui::Ui, ctx: &Context) {
         ui.horizontal(|ui| {
             ui.heading("Available Replays");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -656,71 +657,110 @@ impl ReplayApp {
         });
         ui.separator();
 
-
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.label("Game Mode:");
-                ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode)
-                             .hint_text("Filter"));
-                
-                ui.label("Map:");
-                ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.map_name)
-                             .hint_text("Filter"));
-                
-                ui.label("Workshop Mods:");
-                ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods)
-                             .hint_text("Filter"));
-                
-                ui.label("User ID:");
-                ui.add_sized([120.0, 24.0],
-                             egui::TextEdit::singleline(&mut self.replay_list.filters.user_id)
-                             .hint_text("Filter"));
-                
-                ui.label("Platform:");
-                egui::ComboBox::from_id_source("platform_filter")
-                    .selected_text(match self.replay_list.filters.platform {
-                        PlatformFilter::All => "All",
-                        PlatformFilter::Quest => "Quest",
-                        PlatformFilter::PC => "PC",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::All, "All");
-                        ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::Quest, "Quest");
-                        ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::PC, "PC");
-                    });
+                let total_width = ui.available_width() - 8.0;
+                let field_count = 5.0;
+                let spacing = ui.spacing().item_spacing.x * (field_count - 1.0);
+                let field_width = (total_width - spacing) / field_count;
+                let field_height = 24.0;
+
+                // Game Mode filter
+                ui.vertical(|ui| {
+                    ui.label("Game Mode:");
+                    ui.add_sized([field_width, field_height],
+                        egui::TextEdit::singleline(&mut self.replay_list.filters.game_mode)
+                            .hint_text("Filter"));
+                });
+
+                // Map filter
+                ui.vertical(|ui| {
+                    ui.label("Map:");
+                    ui.add_sized([field_width, field_height],
+                        egui::TextEdit::singleline(&mut self.replay_list.filters.map_name)
+                            .hint_text("Filter"));
+                });
+
+                // Workshop Mods filter
+                ui.vertical(|ui| {
+                    ui.label("Workshop Mods:");
+                    ui.add_sized([field_width, field_height],
+                        egui::TextEdit::singleline(&mut self.replay_list.filters.workshop_mods)
+                            .hint_text("Filter"));
+                });
+
+                // User ID filter
+                ui.vertical(|ui| {
+                    ui.label("User ID:");
+                    ui.add_sized([field_width, field_height],
+                        egui::TextEdit::singleline(&mut self.replay_list.filters.user_id)
+                            .hint_text("Filter"));
+                });
+
+                // Platform filter
+                ui.vertical(|ui| {
+                    ui.label("Platform:");
+                    egui::ComboBox::new(egui::Id::new("platform_filter"), "")
+                        .width(field_width)
+                        .selected_text(match self.replay_list.filters.platform {
+                            PlatformFilter::All => "All",
+                            PlatformFilter::Quest => "Quest",
+                            PlatformFilter::PC => "PC",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::All, "All");
+                            ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::Quest, "Quest");
+                            ui.selectable_value(&mut self.replay_list.filters.platform, PlatformFilter::PC, "PC");
+                        });
+                });
             });
         });
+        ui.separator();
 
         let filtered_replays = self.get_filtered_replays();
 
+        let replay_item_height = 180.0;
+
+        let horizontal_margin = 8.0;
+
+        let full_width = ui.available_width();
+
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-
+            .show_rows(ui, replay_item_height, filtered_replays.len(), |ui, row_range| {
                 if filtered_replays.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label("No replays match the current filters");
                     });
                 } else {
-                    for replay in &filtered_replays {
-                        self.render_replay_item(ui, ctx, replay);
+                    for row in row_range {
+                        let replay = &filtered_replays[row];
+                        let (rect, _response) = ui.allocate_exact_size(
+                            egui::vec2(full_width - 2.0 * horizontal_margin, replay_item_height),
+                            egui::Sense::hover(),
+                        );
+                        let rect = rect.translate(egui::vec2(horizontal_margin, 0.0));
+                        ui.allocate_ui_at_rect(rect, |ui| {
+                            self.render_replay_item_with_width(ui, ctx, replay, rect.width());
+                        });
                     }
                 }
             });
-            
+
         if self.replay_list.total_pages > 0 {
-            egui::Area::new("pagination_controls")
+            egui::Area::new(egui::Id::new("pagination_controls"))
                 .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(ctx.style().visuals.window_fill)
-                        .shadow(egui::epaint::Shadow::small_dark())
-                        .rounding(5.0)
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 4],
+                            blur: 8,
+                            spread: 0,
+                            color: ctx.style().visuals.window_shadow.color,
+                        })
+                        .corner_radius(5.0)
                         .inner_margin(8.0)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -752,91 +792,146 @@ impl ReplayApp {
         }
     }
 
-    fn render_replay_item(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, replay: &ReplayItem) {
+    fn render_replay_item_with_width(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &Context,
+        replay: &ReplayItem,
+        width: f32,
+    ) {
         ui.push_id(replay.id.as_str(), |ui| {
-            egui::Frame::none()
-                .outer_margin(egui::style::Margin::symmetric(8.0, 4.0))
+            egui::Frame::new()
+                .outer_margin(egui::Margin::same(0)) 
                 .show(ui, |ui| {
                     egui::Frame::group(ui.style())
                         .fill(ui.style().visuals.extreme_bg_color)
+                        .inner_margin(egui::Margin::symmetric(8, 0)) 
                         .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(&replay.map_name)
-                                        .strong()
-                                        .size(16.0));
-
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let is_downloading = self.downloading_replay_id
-                                            .as_ref()
-                                            .map_or(false, |id| id == &replay.id);
-                                        
-                                        let is_downloaded = self.downloaded_replays.contains(&replay.id);
-
-                                        if is_downloaded {
-                                            ui.add_enabled(
-                                                false, 
-                                                egui::Button::new("Downloaded")
-                                                    .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
-                                            );
-                                        } else if !is_downloading && 
-                                            self.styled_button(ui, "Download & Process").clicked() {
-                                            self.process_online_replay(&replay.id);
-                                        }
-                                    });
-                                });
-    
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label("Game Mode:");
-                                    ui.label(&replay.game_mode);
-                                    ui.separator();
-                                    ui.label("Date:");
-                                    ui.label(&replay.created_date);
-                                });
-    
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label("Workshop Mods:");
-                                    ui.label(&replay.workshop_mods);
-                                });
-    
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label("Time Since:");
-                                    ui.label(format!("{}s", replay.time_since));
-                                });
-    
-                                ui.separator();
-    
-                                egui::ScrollArea::horizontal()
-                                    .id_source(format!("scroll_{}", replay.id))
-                                    .max_height(72.0)
-                                    .show(ui, |ui| {
-                                        ui.vertical_centered(|ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                                for (idx, user) in replay.users.iter().enumerate() {
-                                                    ui.push_id(idx, |ui| {
-                                                        self.render_user_avatar(ui, ctx, user);
-                                                    });
-                                                }
-                                            });
-                                        });
-                                    });
-                            });
+                            ui.set_width(width - 16.0); 
+                            self.render_replay_item_contents(ui, ctx, replay);
                         });
                 });
         });
     }
 
-    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, user: &str) {
+    fn render_replay_item_contents(&mut self, ui: &mut egui::Ui, ctx: &Context, replay: &ReplayItem) {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&replay.map_name)
+                    .strong()
+                    .size(16.0));
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let is_downloading = self.downloading_replay_id
+                        .as_ref()
+                        .map_or(false, |id| id == &replay.id);
+                    
+                    let is_downloaded = self.downloaded_replays.contains(&replay.id);
+
+                    if is_downloaded {
+                        ui.add_enabled(
+                            false, 
+                            egui::Button::new("Downloaded")
+                                .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
+                        );
+                    } else if !is_downloading && 
+                        self.styled_button(ui, "Download & Process").clicked() {
+                        self.process_online_replay(&replay.id);
+                    }
+                });
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label("Game Mode:");
+                ui.label(&replay.game_mode);
+                ui.separator();
+                ui.label("Date:");
+                ui.label(&replay.created_date);
+            });
+
+            ui.horizontal(|ui| {
+                let mods_popup_id = egui::Id::new(format!("mods_popup_{}", replay.id));
+                let button = ui.button("Mods");
+                ui.vertical(|ui| {
+                    ui.add_space(2.0);
+                    ui.label(format!("{} mod{}", replay.modcount, if replay.modcount == 1 { "" } else { "s" }));
+                });
+
+                if button.clicked() {
+                    ui.memory_mut(|mem| mem.open_popup(mods_popup_id));
+                }
+
+                egui::popup::popup_below_widget(
+                    ui,
+                    mods_popup_id,
+                    &button,
+                    egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+                    |ui: &mut egui::Ui| {
+                        ui.set_min_width(220.0);
+                        ui.label(egui::RichText::new("Workshop Mods").strong());
+                        ui.separator();
+                        if replay.workshop_mods.trim().is_empty() {
+                            ui.label("No mods for this replay.");
+                        } else {
+                            ui.label(&replay.workshop_mods);
+                        }
+                    }
+                );
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label("Time Since:");
+                ui.label(format!("{}s", replay.time_since));
+            });
+
+            ui.separator();
+
+            let avatar_row_height = 72.0;
+            let avatar_size = egui::vec2(64.0, 64.0);
+
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), avatar_row_height),
+                egui::Sense::hover(),
+            );
+
+            ui.allocate_ui_at_rect(rect, |ui| {
+                egui::ScrollArea::horizontal()
+                    .max_height(avatar_row_height)
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                            if replay.users.is_empty() {
+                                let (avatar_rect, _) = ui.allocate_exact_size(avatar_size, egui::Sense::hover());
+                                ui.painter().rect_filled(avatar_rect, 8.0, egui::Color32::DARK_GRAY);
+                                ui.painter().text(
+                                    avatar_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "No Users",
+                                    egui::FontId::proportional(14.0),
+                                    egui::Color32::WHITE,
+                                );
+                            } else {
+                                for (idx, user) in replay.users.iter().enumerate() {
+                                    ui.push_id(idx, |ui| {
+                                        self.render_user_avatar(ui, ctx, user);
+                                    });
+                                }
+                            }
+                        });
+                    });
+            });
+        });
+    }
+
+    fn render_user_avatar(&mut self, ui: &mut egui::Ui, ctx: &Context, user: &str) {
         let avatar_size = egui::vec2(64.0, 64.0);
         
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.style().visuals.window_fill)
-            .inner_margin(egui::style::Margin::same(0.0))
-            .outer_margin(egui::style::Margin::same(0.0))
+            .inner_margin(0.0)
+            .outer_margin(0.0)
             .show(ui, |ui| {
                 ui.set_min_size(avatar_size);
                 ui.set_max_size(avatar_size);
@@ -852,9 +947,7 @@ impl ReplayApp {
                         );
                         
                         if btn_response.clicked() {
-                            ctx.output_mut(|out| {
-                                out.copied_text = user.to_string();
-                            });
+                            ctx.copy_text(user.to_string());
                         }
                         
                         response = Some(btn_response);
@@ -864,9 +957,7 @@ impl ReplayApp {
                         let btn_response = ui.add_sized(avatar_size, egui::Button::new("Loading"));
                         
                         if btn_response.clicked() {
-                            ctx.output_mut(|out| {
-                                out.copied_text = user.to_string();
-                            });
+                            ctx.copy_text(user.to_string());
                         }
                         
                         response = Some(btn_response);
@@ -882,8 +973,9 @@ impl ReplayApp {
                         let rect = resp.rect;
                         ui.painter().rect_stroke(
                             rect.expand(2.0), 
-                            4.0,
-                            egui::Stroke::new(2.0, ui.style().visuals.selection.bg_fill)
+                            egui::epaint::CornerRadius::ZERO,
+                            egui::Stroke::new(2.0, ui.style().visuals.selection.bg_fill),
+                            egui::epaint::StrokeKind::Outside,
                         );
                         
                         resp.on_hover_text(user);
@@ -903,8 +995,7 @@ impl ReplayApp {
                     ui.horizontal(|ui| {
                         if let Some(path) = &self.selected_path {
                             ui.label("Directory:");
-                            ui.add(egui::Label::new(path.display().to_string())
-                                .wrap(true));
+                            ui.add(egui::Label::new(path.display().to_string()).wrap());
                         } else {
                             ui.label("No directory selected");
                         }
@@ -986,7 +1077,7 @@ impl ReplayApp {
                 ui.horizontal(|ui| {
                     let path_text = self.settings.download_dir.display().to_string();
                     ui.label("Save replays to:");
-                    ui.add(egui::Label::new(path_text).wrap(true));
+                    ui.add(egui::Label::new(path_text).wrap());
                     
                     if self.styled_button(ui, "Browse").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -1018,7 +1109,7 @@ impl ReplayApp {
                     self.settings.auto_refresh_enabled,
                     egui::Slider::new(&mut self.settings.auto_refresh_interval_mins, 1..=60)
                         .text("Refresh interval (minutes)")
-                        .clamp_to_range(true)
+                        .clamp_to_range(true)  // Use the deprecated method until we can access the new API
                 );
                 
                 ui.add_space(4.0);
@@ -1087,7 +1178,7 @@ impl ReplayApp {
     }
 
     fn get_settings_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let mut path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "PavlovVR", "ReplayToolbox") {
+        let path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "PavlovVR", "ReplayToolbox") {
             proj_dirs.config_dir().to_path_buf()
         } else {
             let mut path = std::env::current_dir()?;
@@ -1120,7 +1211,8 @@ impl ReplayApp {
     fn show_success(&mut self, message: impl Into<String>) {
         self.show_notification(message.into(), NotificationType::Success)
     }
-    
+
+    #[allow(dead_code)]
     fn show_warning(&mut self, message: impl Into<String>) {
         self.show_notification(message.into(), NotificationType::Warning)
     }
@@ -1151,7 +1243,7 @@ impl ReplayApp {
         f * f * f + 1.0
     }
 
-    fn render_notifications(&self, ctx: &egui::Context) {
+    fn render_notifications(&self, ctx: &Context) {
         let notification_height = 40.0;
         let notification_spacing = 8.0;
         let max_visible = 5;
@@ -1189,14 +1281,19 @@ impl ReplayApp {
             };
             
             // Render notification
-            egui::Area::new(format!("notification_{}", notification.id))
+            egui::Area::new(egui::Id::new(format!("notification_{}", notification.id)))
                 .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -bottom_offset))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::new() // Use new() instead of none()
                         .fill(bg_color)
-                        .rounding(8.0)
-                        .shadow(egui::epaint::Shadow::small_light())
+                        .corner_radius(8.0) // Use corner_radius instead of rounding
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 2],  // Change from Vec2 to [i8; 2]
+                            blur: 4,         // Change from f32 to u8
+                            spread: 0,       // Change from f32 to u8
+                            color: ctx.style().visuals.window_shadow.color, // Add required color field
+                        }) // Updated shadow
                         .show(ui, |ui| {
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
