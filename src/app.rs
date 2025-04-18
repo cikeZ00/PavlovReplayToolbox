@@ -726,7 +726,7 @@ impl ReplayApp {
 
         let filtered_replays = self.get_filtered_replays();
 
-        let replay_item_height = 180.0;
+        let replay_item_height = 200.0;
 
         let horizontal_margin = 8.0;
 
@@ -755,6 +755,7 @@ impl ReplayApp {
                                 self.render_replay_item_with_width(ui, ctx, replay, rect.width());
                             },
                         );
+                        ui.add_space(4.0);
                     }
                 }
             });
@@ -834,11 +835,22 @@ impl ReplayApp {
 
     fn render_replay_item_contents(&mut self, ui: &mut egui::Ui, ctx: &Context, replay: &ReplayItem) {
         ui.vertical(|ui| {
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&replay.map_name)
-                    .strong()
-                    .size(16.0));
-
+                egui::Frame::new()
+                    .fill(ui.style().visuals.extreme_bg_color) // Use a strong background color
+                    .stroke(egui::Stroke::new(1.0, ui.style().visuals.window_stroke().color)) // Optional border
+                    .corner_radius(egui::CornerRadius::same(8)) // Rounded corners
+                    .inner_margin(egui::Margin { top: 4, left: 8, right: 8, bottom: 4 })
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(&replay.map_name)
+                                .color(ui.style().visuals.text_color())
+                                .size(24.0)
+                                .strong()
+                        );
+                    });
+                
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let is_downloading = self.downloading_replay_id
                         .as_ref()
@@ -847,14 +859,23 @@ impl ReplayApp {
                     let is_downloaded = self.downloaded_replays.contains(&replay.id);
 
                     if is_downloaded {
-                        ui.add_enabled(
-                            false, 
-                            egui::Button::new("Downloaded")
-                                .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
-                        );
-                    } else if !is_downloading && 
-                        self.styled_button(ui, "Download & Process").clicked() {
-                        self.process_online_replay(&replay.id);
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin { top: 8, left: 0, right: 0, bottom: 0 })
+                            .show(ui, |ui| {
+                                ui.add_enabled(
+                                    false, 
+                                    egui::Button::new("Downloaded")
+                                        .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
+                                );
+                            });
+                    } else if !is_downloading {
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin { top: 8, left: 0, right: 0, bottom: 0 })
+                            .show(ui, |ui| {
+                                if self.styled_button(ui, "Download & Process").clicked() {
+                                    self.process_online_replay(&replay.id);
+                                }
+                            });
                     }
                 });
             });
