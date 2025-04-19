@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Read,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -34,6 +34,35 @@ struct GitHubRelease {
     name: String,
     body: Option<String>,
     published_at: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ModioResponse {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    description_plaintext: String,
+    #[serde(default)]
+    logo: ModioLogo,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct ModioLogo {
+    #[serde(default)]
+    thumb_320x180: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ModioErrorResponse {
+    error: ModioErrorDetails,
+}
+
+#[derive(Deserialize, Debug)]
+struct ModioErrorDetails {
+    message: String,
+    code: u32,
 }
 
 #[derive(Clone)]
@@ -69,6 +98,8 @@ pub struct Settings {
     pub auto_refresh_interval_mins: u64,
     pub auto_download_enabled: bool,
     pub auto_download_trigger_user_id: String,
+    pub modio_api_url: String,
+    pub modio_api_token: String,
 }
 
 impl Default for Settings {
@@ -79,6 +110,8 @@ impl Default for Settings {
             auto_refresh_interval_mins: 5,
             auto_download_enabled: false,
             auto_download_trigger_user_id: String::new(),
+            modio_api_url: "https://api.mod.io/v1".to_string(),
+            modio_api_token: String::new(),
         }
     }
 }
@@ -113,6 +146,16 @@ pub struct ReplayListState {
     pub filters: ReplayFilters,
 }
 
+#[derive(Clone, Debug)]
+pub struct ModInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub thumbnail_url: Option<String>,
+    pub is_loading: bool,
+    pub failed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Page {
     Main,
@@ -144,6 +187,13 @@ pub struct ReplayApp {
     next_notification_id: u64,
     update_info: Option<UpdateInfo>,
     update_rx: UpdateInfoReceiver,
+    pub mod_info_cache: HashMap<String, ModInfo>,
+    pub mod_info_tx: std::sync::mpsc::Sender<ModInfo>,
+    pub mod_info_rx: std::sync::mpsc::Receiver<ModInfo>,
+    pub mod_thumbnail_textures: HashMap<String, egui::TextureHandle>,
+    pub loading_thumbnails: HashSet<String>,
+    pub mod_thumbnail_rx: mpsc::Receiver<(String, egui::ColorImage)>,
+    pub mod_thumbnail_tx: mpsc::Sender<(String, egui::ColorImage)>,
 }
 
 impl ReplayApp {
@@ -151,6 +201,8 @@ impl ReplayApp {
         let (profile_tx, profile_rx) = std::sync::mpsc::channel();
         let (downloaded_tx, downloaded_rx) = std::sync::mpsc::channel();
         let (update_tx, update_rx) = std::sync::mpsc::channel();
+        let (mod_info_tx, mod_info_rx) = std::sync::mpsc::channel();
+        let (mod_thumbnail_tx, mod_thumbnail_rx) = mpsc::channel();
 
         let settings = Self::load_settings().unwrap_or_default();
 
@@ -178,6 +230,13 @@ impl ReplayApp {
             next_notification_id: 0,
             update_info: None,
             update_rx,
+            mod_info_cache: HashMap::new(),
+            mod_info_tx,
+            mod_info_rx,
+            mod_thumbnail_textures: HashMap::new(),
+            loading_thumbnails: HashSet::new(),
+            mod_thumbnail_rx,
+            mod_thumbnail_tx,
         };
         app.refresh_replays();
         app.check_downloaded_replays();
@@ -882,7 +941,7 @@ impl ReplayApp {
         });
     }
     
-    fn show_info(&mut self, message: impl Into<String>) {
+    pub fn show_info(&mut self, message: impl Into<String>) {
         self.show_notification(message.into(), NotificationType::Info)
     }
     
@@ -978,6 +1037,182 @@ impl ReplayApp {
                         });
                 });
         }
+    }
+
+    pub fn load_mod_info(&mut self, mod_id: String) {
+        if self.mod_info_cache.contains_key(&mod_id) {
+            return;
+        }
+        
+        // Add a placeholder while loading
+        self.mod_info_cache.insert(mod_id.clone(), ModInfo {
+            id: mod_id.clone(),
+            name: "Loading...".to_string(),
+            description: "".to_string(),
+            thumbnail_url: None,
+            is_loading: true,
+            failed: false,
+        });
+        
+        let mod_info_tx = self.mod_info_tx.clone();
+        let api_url = self.settings.modio_api_url.clone();
+        let api_token = self.settings.modio_api_token.clone();
+        
+        thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build() {
+                    Ok(client) => client,
+                    Err(_) => {
+                        let _ = mod_info_tx.send(ModInfo {
+                            id: mod_id,
+                            name: "Error".to_string(),
+                            description: "Failed to create HTTP client".to_string(),
+                            thumbnail_url: None,
+                            is_loading: false,
+                            failed: true,
+                        });
+                        return;
+                    }
+                };
+            
+            // If no API token is provided, show basic info
+            if api_token.is_empty() {
+                let _ = mod_info_tx.send(ModInfo {
+                    id: mod_id.clone(),
+                    name: format!("Mod ID: {}", mod_id),
+                    description: "Configure mod.io API in settings to see mod details.".to_string(),
+                    thumbnail_url: None,
+                    is_loading: false,
+                    failed: false,
+                });
+                return;
+            }
+            
+            // Pavlov's game ID on mod.io is 3959
+            let url = format!("{}/games/3959/mods/{}?api_key={}", api_url, mod_id, api_token);
+            
+            match client.get(&url).send() {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        match response.json::<ModioResponse>() {
+                            Ok(mod_data) => {
+                                let _ = mod_info_tx.send(ModInfo {
+                                    id: mod_id,
+                                    name: mod_data.name,
+                                    description: if mod_data.description_plaintext.is_empty() {
+                                        mod_data.summary
+                                    } else {
+                                        mod_data.description_plaintext
+                                    },
+                                    thumbnail_url: if !mod_data.logo.thumb_320x180.is_empty() {
+                                        Some(mod_data.logo.thumb_320x180)
+                                    } else {
+                                        None
+                                    },
+                                    is_loading: false,
+                                    failed: false,
+                                });
+                            },
+                            Err(e) => {
+                                let _ = mod_info_tx.send(ModInfo {
+                                    id: mod_id,
+                                    name: "Parse Error".to_string(),
+                                    description: format!("Failed to parse mod.io API response: {}", e),
+                                    thumbnail_url: None,
+                                    is_loading: false,
+                                    failed: true,
+                                });
+                            }
+                        }
+                    } else {
+                        let error_text = response.text().unwrap_or_default();
+                        let error_msg = match serde_json::from_str::<ModioErrorResponse>(&error_text) {
+                            Ok(error) => format!("{} (Code: {})", error.error.message, error.error.code),
+                            Err(_) => format!("HTTP error: {}", status)
+                        };
+                        
+                        let _ = mod_info_tx.send(ModInfo {
+                            id: mod_id,
+                            name: "API Error".to_string(),
+                            description: error_msg,
+                            thumbnail_url: None,
+                            is_loading: false,
+                            failed: true,
+                        });
+                    }
+                },
+                Err(e) => {
+                    let _ = mod_info_tx.send(ModInfo {
+                        id: mod_id,
+                        name: "Network Error".to_string(),
+                        description: format!("Connection failed: {}", e),
+                        thumbnail_url: None,
+                        is_loading: false,
+                        failed: true,
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn parse_mod_ids(&self, workshop_mods: &str) -> Vec<String> {
+        let mut mod_ids = Vec::new();
+        
+        let cleaned_str = workshop_mods.strip_prefix("AdditionalMods=").unwrap_or(workshop_mods);
+        
+        for part in cleaned_str.split('-') {
+            if part.starts_with("UGC") {
+                if let Some(slash_pos) = part.find('/') {
+                    let id = &part[3..slash_pos];
+                    mod_ids.push(id.to_string());
+                }
+            }
+        }
+        
+        mod_ids
+    }
+
+    pub fn load_mod_thumbnail(&mut self, mod_id: String, thumbnail_url: String) {
+        if self.mod_thumbnail_textures.contains_key(&mod_id) || self.loading_thumbnails.contains(&mod_id) {
+            return;
+        }
+        
+        self.loading_thumbnails.insert(mod_id.clone());
+        
+        let thumbnail_tx = self.mod_thumbnail_tx.clone();
+        
+        thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build() {
+                    Ok(client) => client,
+                    Err(_) => return,
+                };
+            
+            match client.get(&thumbnail_url).send() {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        match response.bytes() {
+                            Ok(bytes) => {
+                                match image::load_from_memory(&bytes) {
+                                    Ok(img) => {
+                                        let img = img.to_rgba8();
+                                        let size = [img.width() as usize, img.height() as usize];
+                                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &img.into_raw());
+                                        let _ = thumbnail_tx.send((mod_id, color_image));
+                                    },
+                                    Err(_) => {} // Failed to parse image
+                                }
+                            },
+                            Err(_) => {} // Failed to get bytes
+                        }
+                    }
+                },
+                Err(_) => {} // Failed to send request
+            }
+        });
     }
 }
 
@@ -1077,6 +1312,24 @@ impl App for ReplayApp {
             );
             self.profile_textures.insert(user.clone(), texture_handle);
             self.loading_profiles.remove(&user);
+        }
+        
+        while let Ok(mod_info) = self.mod_info_rx.try_recv() {
+            self.mod_info_cache.insert(mod_info.id.clone(), mod_info);
+        }
+        
+        while let Ok((mod_id, color_image)) = self.mod_thumbnail_rx.try_recv() {
+            let texture_handle = ctx.load_texture(
+                &format!("mod_thumbnail_{}", mod_id),
+                color_image,
+                egui::TextureOptions {
+                    magnification: egui::TextureFilter::Linear,
+                    minification: egui::TextureFilter::Linear,
+                    ..Default::default()
+                },
+            );
+            self.mod_thumbnail_textures.insert(mod_id.clone(), texture_handle);
+            self.loading_thumbnails.remove(&mod_id);
         }
         
         while let Ok(replay_id) = self.downloaded_rx.try_recv() {

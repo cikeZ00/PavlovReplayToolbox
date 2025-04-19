@@ -76,6 +76,32 @@ pub fn render_settings_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
             ui.label("Automatically download replays containing the specified user ID");
         });
     });
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    ui.heading("Mod.io API Settings");
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("API URL:");
+        ui.add(egui::TextEdit::singleline(&mut app.settings.modio_api_url)
+            .desired_width(300.0));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("API Token:");
+        ui.add(egui::TextEdit::singleline(&mut app.settings.modio_api_token)
+            .password(true)
+            .desired_width(300.0));
+    });
+
+    ui.add_space(4.0);
+    ui.label("Configure your mod.io API credentials to see mod details.");
+    ui.label("You can get an API key from https://mod.io/apikey");
+
+    ui.add_space(8.0);
     
     // Apply button
     ui.horizontal(|ui| {
