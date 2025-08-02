@@ -836,11 +836,13 @@ impl ReplayApp {
                 
                 let mut response = None;
                 
-                if let Some(texture) = self.profile_textures.get(user) {
+                let texture_handle = self.profile_textures.get(user).cloned();
+                
+                if let Some(texture) = texture_handle {
                     ui.centered_and_justified(|ui| {
                         let btn_response = ui.add_sized(
                             avatar_size,
-                            egui::Button::image_and_text(texture, "")
+                            egui::Button::image_and_text(&texture, "")
                                 .frame(false)
                         );
                         
@@ -866,7 +868,11 @@ impl ReplayApp {
                     }
                 }
                 
-                if let Some(resp) = response {
+                if let Some(resp) = &response {
+                    if resp.clicked() {
+                        self.show_success(format!("Copied user ID: {}", user));
+                    }
+                    
                     if resp.hovered() {
                         let rect = resp.rect;
                         ui.painter().rect_stroke(
@@ -876,7 +882,7 @@ impl ReplayApp {
                             egui::epaint::StrokeKind::Outside,
                         );
                         
-                        resp.on_hover_text(user);
+                        resp.clone().on_hover_text(user);
                     }
                 }
             });
