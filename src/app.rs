@@ -161,6 +161,7 @@ pub enum Page {
     Main,
     ProcessLocal,
     Settings,
+    Manage,
 }
 
 pub struct ReplayApp {
@@ -170,7 +171,7 @@ pub struct ReplayApp {
     is_downloading: bool,
     pub selected_path: Option<PathBuf>,
     pub show_completion_dialog: bool,
-    current_page: Page,
+    pub current_page: Page,
     pub replay_list: ReplayListState,
     profile_textures: HashMap<String, egui::TextureHandle>,
     loading_profiles: HashSet<String>,
@@ -836,11 +837,13 @@ impl ReplayApp {
                 
                 let mut response = None;
                 
-                if let Some(texture) = self.profile_textures.get(user) {
+                let texture_handle = self.profile_textures.get(user).cloned();
+                
+                if let Some(texture) = texture_handle {
                     ui.centered_and_justified(|ui| {
                         let btn_response = ui.add_sized(
                             avatar_size,
-                            egui::Button::image_and_text(texture, "")
+                            egui::Button::image_and_text(&texture, "")
                                 .frame(false)
                         );
                         
@@ -866,7 +869,11 @@ impl ReplayApp {
                     }
                 }
                 
-                if let Some(resp) = response {
+                if let Some(resp) = &response {
+                    if resp.clicked() {
+                        self.show_success(format!("Copied user ID: {}", user));
+                    }
+                    
                     if resp.hovered() {
                         let rect = resp.rect;
                         ui.painter().rect_stroke(
@@ -876,7 +883,7 @@ impl ReplayApp {
                             egui::epaint::StrokeKind::Outside,
                         );
                         
-                        resp.on_hover_text(user);
+                        resp.clone().on_hover_text(user);
                     }
                 }
             });
@@ -1377,6 +1384,16 @@ impl App for ReplayApp {
                     self.current_page = Page::ProcessLocal;
                 });
 
+                ui.add_sized(
+                    [80.0, button_height],
+                    egui::SelectableLabel::new(
+                        self.current_page == Page::Manage,
+                        "Manage"
+                    )
+                ).clicked().then(|| {
+                    self.current_page = Page::Manage;
+                });
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_sized(
                         [80.0, button_height],
@@ -1398,6 +1415,7 @@ impl App for ReplayApp {
                 Page::Main => pages::render_main_page(self, ui, ctx),
                 Page::ProcessLocal => pages::render_process_page(self, ui),
                 Page::Settings => pages::render_settings_page(self, ui),
+                Page::Manage => pages::render_manage_page(self, ui, ctx),
             }
         });
 
