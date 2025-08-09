@@ -161,6 +161,7 @@ pub enum Page {
     Main,
     ProcessLocal,
     Settings,
+    Manage,
 }
 
 pub struct ReplayApp {
@@ -170,7 +171,7 @@ pub struct ReplayApp {
     is_downloading: bool,
     pub selected_path: Option<PathBuf>,
     pub show_completion_dialog: bool,
-    current_page: Page,
+    pub current_page: Page,
     pub replay_list: ReplayListState,
     profile_textures: HashMap<String, egui::TextureHandle>,
     loading_profiles: HashSet<String>,
@@ -1383,6 +1384,16 @@ impl App for ReplayApp {
                     self.current_page = Page::ProcessLocal;
                 });
 
+                ui.add_sized(
+                    [80.0, button_height],
+                    egui::SelectableLabel::new(
+                        self.current_page == Page::Manage,
+                        "Manage"
+                    )
+                ).clicked().then(|| {
+                    self.current_page = Page::Manage;
+                });
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_sized(
                         [80.0, button_height],
@@ -1404,6 +1415,7 @@ impl App for ReplayApp {
                 Page::Main => pages::render_main_page(self, ui, ctx),
                 Page::ProcessLocal => pages::render_process_page(self, ui),
                 Page::Settings => pages::render_settings_page(self, ui),
+                Page::Manage => pages::render_manage_page(self, ui, ctx),
             }
         });
 
