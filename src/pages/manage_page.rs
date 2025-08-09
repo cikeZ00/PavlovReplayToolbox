@@ -332,9 +332,13 @@ pub fn render_manage_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context)
     ui.add_space(12.0);
     
     // Replay list
-    let replay_item_height = 80.0;
     let horizontal_margin = 8.0;
     let full_width = ui.available_width();
+    
+    let frame_vertical_margin = 9.0;
+    let content_height = 48.0;
+    let row_spacing = 2.0;
+    let replay_item_height = frame_vertical_margin + content_height + row_spacing;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
@@ -345,7 +349,7 @@ pub fn render_manage_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context)
             for row in row_range {
                 let replay = &downloaded_replays[row];
                 let (rect, _response) = ui.allocate_exact_size(
-                    egui::vec2(full_width - 2.0 * horizontal_margin, replay_item_height),
+                    egui::vec2(full_width - 2.0 * horizontal_margin, replay_item_height - row_spacing),
                     egui::Sense::hover(),
                 );
                 let rect = rect.translate(egui::vec2(horizontal_margin, 0.0));
@@ -357,7 +361,7 @@ pub fn render_manage_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context)
                         render_replay_row(app, ui, ctx, replay, row, rect.width(), &mut to_delete, &mut show_info_for);
                     },
                 );
-                ui.add_space(2.0);
+                ui.add_space(row_spacing);
             }
             
             if let Some(index) = to_delete {

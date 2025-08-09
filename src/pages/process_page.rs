@@ -2,7 +2,7 @@ use eframe::egui;
 use crate::app::ReplayApp;
 
 pub fn render_process_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
-    ui.heading("Process Local Replay");
+    ui.heading("Process Local Replay (Legacy Replay Format)");
     ui.separator();
 
     egui::ScrollArea::vertical()
