@@ -259,7 +259,36 @@ fn main_cli(replay_id: String, output_path: Option<String>, cfg: CliCfg){
     }
 }
 
+// When running in CLI mode on Windows, ensure a console is attached to display output
+#[cfg(windows)]
+const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn AttachConsole(dw_process_id: u32) -> i32;
+    fn AllocConsole() -> i32;
+}
+
+#[cfg(windows)]
+fn ensure_console() {
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            let _ = AllocConsole();
+        }
+    }
+}
+
+// Non-Windows platforms do not require special console handling
+#[cfg(not(windows))]
+fn ensure_console() {}
+
 fn main(){
+    let has_cli_args = std::env::args_os().nth(1).is_some();
+    if has_cli_args {
+        ensure_console();
+    }
+
     // CLI configurations & flags
     let mut cli_replay_id: Option<String> = None;
     let mut cli_filepath: Option<String> = None;
