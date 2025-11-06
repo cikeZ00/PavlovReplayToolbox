@@ -5,6 +5,11 @@ use std::error::Error;
 // This adds approximately 5 bytes overhead (4 for length + 1 for null)
 const STRING_BUFFER_OVERHEAD: usize = 5;
 
+/// Helper function to estimate the buffer size for a string field
+fn estimate_string_buffer_size(opt_string: Option<&String>) -> usize {
+    opt_string.map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD)
+}
+
 /// A part of the replay file: either the meta part or a chunk.
 pub enum ReplayPart {
     Meta(Vec<u8>),
@@ -44,10 +49,10 @@ pub fn build_replay(parts: &[ReplayPart]) -> Result<Vec<u8>, Box<dyn Error>> {
                         total_size += 16 + chunk.data.len();
                     }
                     2 | 3 => {
-                        // Estimate string buffer sizes
-                        let id_len = chunk.id.as_ref().map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD);
-                        let group_len = chunk.group.as_ref().map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD);
-                        let meta_len = chunk.metadata.as_ref().map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD);
+                        // Estimate string buffer sizes using helper function
+                        let id_len = estimate_string_buffer_size(chunk.id.as_ref());
+                        let group_len = estimate_string_buffer_size(chunk.group.as_ref());
+                        let meta_len = estimate_string_buffer_size(chunk.metadata.as_ref());
                         total_size += id_len + group_len + meta_len + 12 + chunk.data.len();
                     }
                     _ => {}

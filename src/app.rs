@@ -731,7 +731,7 @@ impl ReplayApp {
                     }
                     
                     // Try to extract ID from filename first (faster than reading file)
-                    if let Some(filename_str) = path.file_stem().and_then(|f| f.to_str()) {
+                    if let Some(filename_str) = path.file_name().and_then(|f| f.to_str()) {
                         // Look for pattern (id) at the end of filename
                         if let Some(id_start) = filename_str.rfind('(') {
                             if let Some(id_end) = filename_str[id_start..].find(')') {

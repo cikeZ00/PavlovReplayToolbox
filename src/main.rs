@@ -142,7 +142,7 @@ fn main_cli(replay_id: String, output_path: Option<String>, cfg: CliCfg){
         println!("Downloading metadata.");
 
         let metadata_result = match client
-            .get(format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
+            .get(&format!("{}/meta/{}", API_BASE_URL, replay_id_clone))
             .send() {
                 Ok(resp) => {
                     if !resp.status().is_success() {
