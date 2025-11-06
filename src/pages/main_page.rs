@@ -212,8 +212,7 @@ fn render_replay_item_contents(
             
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let is_downloading = app.downloading_replay_id
-                    .as_ref()
-                    .map_or(false, |id| id == &replay.id);
+                    .as_ref() == Some(&replay.id);
                 
                 let is_downloaded = app.downloaded_replays.contains(&replay.id);
 

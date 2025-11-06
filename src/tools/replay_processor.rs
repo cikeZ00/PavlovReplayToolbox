@@ -297,7 +297,9 @@ pub fn download_replay(
     completed_components += 1;
     update_progress(completed_components);
     
-    let mut download_chunks = Vec::new();
+    // Pre-allocate download_chunks with expected capacity to avoid reallocations
+    // 1 header + num_chunks stream chunks + estimated events
+    let mut download_chunks = Vec::with_capacity(1 + num_chunks + 50);
     download_chunks.push(Chunk {
         data: header_data,
         chunk_type: 0,
@@ -373,6 +375,10 @@ pub fn download_replay(
     
     stream_chunks.sort_by_key(|(i, _)| *i);
     download_chunks.extend(stream_chunks.into_iter().map(|(_, chunk)| chunk));
+
+    // Pre-allocate capacity for event chunks to avoid reallocations
+    let total_events = events.events.len() + events_pavlov.events.len();
+    download_chunks.reserve(total_events);
 
     // Process events from both groups and add them as chunks.
     for event in events.events {
@@ -456,7 +462,6 @@ pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn Error>>
         .ok_or_else(|| "Invalid metadata: missing 'meta' field")?;
 
     let update_callback = &config.update_callback;
-    let mut download_chunks: Vec<Chunk> = Vec::new();
 
     let pavlov_events = metadata_file
         .events_pavlov
@@ -473,16 +478,6 @@ pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn Error>>
 
     let header_file = chunks_dir.join("replay.header");
     let header_data = load_chunk_file(&header_file)?;
-    download_chunks.push(Chunk {
-        data: header_data,
-        chunk_type: 0,
-        time1: None,
-        time2: None,
-        id: None,
-        group: None,
-        metadata: None,
-        size_in_bytes: None,
-    });
 
     let mut stream_files: Vec<PathBuf> = fs::read_dir(&chunks_dir)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
@@ -495,6 +490,21 @@ pub fn process_replay(config: Option<Config>) -> Result<Vec<u8>, Box<dyn Error>>
             .and_then(|s| s.split('.').nth(1))
             .and_then(|num| num.parse::<i32>().ok())
             .unwrap_or(0)
+    });
+    
+    // Pre-allocate download_chunks with estimated capacity
+    let estimated_capacity = 1 + stream_files.len() + pavlov_events.len() + checkpoint_events.len();
+    let mut download_chunks: Vec<Chunk> = Vec::with_capacity(estimated_capacity);
+    
+    download_chunks.push(Chunk {
+        data: header_data,
+        chunk_type: 0,
+        time1: None,
+        time2: None,
+        id: None,
+        group: None,
+        metadata: None,
+        size_in_bytes: None,
     });
 
     // Initialize progress

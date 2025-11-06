@@ -22,7 +22,37 @@ fn write_string_buffer(s: &str) -> Vec<u8> {
 
 /// Build the final replay buffer.
 pub fn build_replay(parts: &[ReplayPart]) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut buffers: Vec<u8> = Vec::new();
+    // Pre-calculate total buffer size to avoid reallocations
+    let mut total_size = 0;
+    for part in parts {
+        match part {
+            ReplayPart::Meta(data) => {
+                total_size += data.len();
+            }
+            ReplayPart::Chunk(chunk) => {
+                // 8 bytes for chunk header
+                total_size += 8;
+                match chunk.chunk_type {
+                    0 => {
+                        total_size += chunk.data.len();
+                    }
+                    1 => {
+                        total_size += 16 + chunk.data.len();
+                    }
+                    2 | 3 => {
+                        // Estimate string buffer sizes
+                        let id_len = chunk.id.as_ref().map(|s| s.len() + 5).unwrap_or(5);
+                        let group_len = chunk.group.as_ref().map(|s| s.len() + 5).unwrap_or(5);
+                        let meta_len = chunk.metadata.as_ref().map(|s| s.len() + 5).unwrap_or(5);
+                        total_size += id_len + group_len + meta_len + 12 + chunk.data.len();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    let mut buffers: Vec<u8> = Vec::with_capacity(total_size);
 
     for part in parts {
         match part {

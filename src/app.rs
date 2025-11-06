@@ -483,11 +483,17 @@ impl ReplayApp {
             return;
         }
     
+        // Cache the lowercase version to avoid repeated conversions
         let trigger_user_id = self.settings.auto_download_trigger_user_id.to_lowercase();
         
+        // Find first replay that matches trigger and isn't downloaded
         let replay_to_download = self.replay_list.replays.iter()
             .find(|replay| {
-                !self.downloaded_replays.contains(&replay.id) && 
+                // Short-circuit: skip if already downloaded
+                if self.downloaded_replays.contains(&replay.id) {
+                    return false;
+                }
+                // Check if any user matches the trigger
                 replay.users.iter().any(|user| user.to_lowercase().contains(&trigger_user_id))
             })
             .map(|replay| replay.id.clone());
@@ -713,32 +719,43 @@ impl ReplayApp {
     fn check_downloaded_replays(&mut self) {
         if let Ok(entries) = fs::read_dir(std::env::current_dir().unwrap_or_default()) {
             for entry in entries.flatten() {
+                // Early exit if not a file or wrong extension
                 if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_file() {
-                        if let Some(ext) = entry.path().extension() {
-                            if ext == "replay" {
-                                if let Some(filename) = entry.path().file_name() {
-                                    if let Some(filename_str) = filename.to_str() {
-                                        if let Some(id_start) = filename_str.rfind('(') {
-                                            if let Some(id_end) = filename_str[id_start..].find(')') {
-                                                let id = &filename_str[id_start + 1..id_start + id_end];
-                                                self.downloaded_replays.insert(id.to_string());
-                                                continue;
-                                            }
-                                        }
-
-                                        if let Ok(mut file) = fs::File::open(entry.path()) {
-                                            let mut buffer = [0; 1024];
-                                            if file.read(&mut buffer).is_ok() {
-                                                let content = String::from_utf8_lossy(&buffer);
-                                                if let Some(id_start) = content.find("\"id\":\"") {
-                                                    let id_start = id_start + 6;
-                                                    if let Some(id_end) = content[id_start..].find('"') {
-                                                        let id = &content[id_start..id_start + id_end];
-                                                        self.downloaded_replays.insert(id.to_string());
-                                                    }
-                                                }
-                                            }
+                    if !file_type.is_file() {
+                        continue;
+                    }
+                    
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("replay") {
+                        continue;
+                    }
+                    
+                    // Try to extract ID from filename first (faster than reading file)
+                    if let Some(filename_str) = path.file_stem().and_then(|f| f.to_str()) {
+                        // Look for pattern (id) at the end of filename
+                        if let Some(id_start) = filename_str.rfind('(') {
+                            if let Some(id_end) = filename_str[id_start..].find(')') {
+                                let id = &filename_str[id_start + 1..id_start + id_end];
+                                if !id.is_empty() {
+                                    self.downloaded_replays.insert(id.to_string());
+                                    continue; // Skip file reading if we found ID in filename
+                                }
+                            }
+                        }
+                        
+                        // Fallback: read file to extract ID (only if not found in filename)
+                        if let Ok(mut file) = fs::File::open(&path) {
+                            let mut buffer = [0; 1024];
+                            if let Ok(n) = file.read(&mut buffer) {
+                                // Use the actual bytes read, not the full buffer
+                                let content = String::from_utf8_lossy(&buffer[..n]);
+                                // Look for "id":" pattern more efficiently
+                                if let Some(id_start) = content.find("\"id\":\"") {
+                                    let id_start = id_start + 6;
+                                    if let Some(id_end) = content[id_start..].find('"') {
+                                        let id = &content[id_start..id_start + id_end];
+                                        if !id.is_empty() {
+                                            self.downloaded_replays.insert(id.to_string());
                                         }
                                     }
                                 }
@@ -796,26 +813,55 @@ impl ReplayApp {
     }
 
     pub fn get_filtered_replays(&self) -> Vec<ReplayItem> {
+        // Pre-compute lowercase filter strings once to avoid repeated allocations
+        let game_mode_filter = if !self.replay_list.filters.game_mode.is_empty() {
+            Some(self.replay_list.filters.game_mode.to_lowercase())
+        } else {
+            None
+        };
+        
+        let map_name_filter = if !self.replay_list.filters.map_name.is_empty() {
+            Some(self.replay_list.filters.map_name.to_lowercase())
+        } else {
+            None
+        };
+        
+        let workshop_mods_filter = if !self.replay_list.filters.workshop_mods.is_empty() {
+            Some(self.replay_list.filters.workshop_mods.to_lowercase())
+        } else {
+            None
+        };
+        
+        let user_id_filter = if !self.replay_list.filters.user_id.is_empty() {
+            Some(self.replay_list.filters.user_id.to_lowercase())
+        } else {
+            None
+        };
+
         self.replay_list.replays.iter()
             .filter(|replay| {
-                if !self.replay_list.filters.game_mode.is_empty() && 
-                   !replay.game_mode.to_lowercase().contains(&self.replay_list.filters.game_mode.to_lowercase()) {
-                    return false;
+                if let Some(ref filter) = game_mode_filter {
+                    if !replay.game_mode.to_lowercase().contains(filter) {
+                        return false;
+                    }
                 }
 
-                if !self.replay_list.filters.map_name.is_empty() && 
-                   !replay.map_name.to_lowercase().contains(&self.replay_list.filters.map_name.to_lowercase()) {
-                    return false;
+                if let Some(ref filter) = map_name_filter {
+                    if !replay.map_name.to_lowercase().contains(filter) {
+                        return false;
+                    }
                 }
 
-                if !self.replay_list.filters.workshop_mods.is_empty() && 
-                   !replay.workshop_mods.to_lowercase().contains(&self.replay_list.filters.workshop_mods.to_lowercase()) {
-                    return false;
+                if let Some(ref filter) = workshop_mods_filter {
+                    if !replay.workshop_mods.to_lowercase().contains(filter) {
+                        return false;
+                    }
                 }
 
-                if !self.replay_list.filters.user_id.is_empty() &&
-                   !replay.users.iter().any(|user| user.to_lowercase().contains(&self.replay_list.filters.user_id.to_lowercase())) {
-                    return false;
+                if let Some(ref filter) = user_id_filter {
+                    if !replay.users.iter().any(|user| user.to_lowercase().contains(filter)) {
+                        return false;
+                    }
                 }
 
                 true
