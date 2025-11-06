@@ -403,7 +403,7 @@ fn render_replay_row(
 ) {
     ui.push_id(format!("replay_row_{}", index), |ui| {
         egui::Frame::new()
-            .fill(if index % 2 == 0 { ui.style().visuals.faint_bg_color } else { egui::Color32::TRANSPARENT })
+            .fill(if index.is_multiple_of(2) { ui.style().visuals.faint_bg_color } else { egui::Color32::TRANSPARENT })
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_width(width - 24.0);

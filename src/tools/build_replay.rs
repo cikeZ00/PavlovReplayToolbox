@@ -1,6 +1,15 @@
 use crate::tools::replay_processor::Chunk;
 use std::error::Error;
 
+// String buffers in replay format include: [int32 length][utf8 bytes][null terminator]
+// This adds approximately 5 bytes overhead (4 for length + 1 for null)
+const STRING_BUFFER_OVERHEAD: usize = 5;
+
+/// Helper function to estimate the buffer size for a string field
+fn estimate_string_buffer_size(opt_string: Option<&String>) -> usize {
+    opt_string.map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD)
+}
+
 /// A part of the replay file: either the meta part or a chunk.
 pub enum ReplayPart {
     Meta(Vec<u8>),
@@ -22,7 +31,37 @@ fn write_string_buffer(s: &str) -> Vec<u8> {
 
 /// Build the final replay buffer.
 pub fn build_replay(parts: &[ReplayPart]) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut buffers: Vec<u8> = Vec::new();
+    // Pre-calculate total buffer size to avoid reallocations
+    let mut total_size = 0;
+    for part in parts {
+        match part {
+            ReplayPart::Meta(data) => {
+                total_size += data.len();
+            }
+            ReplayPart::Chunk(chunk) => {
+                // 8 bytes for chunk header
+                total_size += 8;
+                match chunk.chunk_type {
+                    0 => {
+                        total_size += chunk.data.len();
+                    }
+                    1 => {
+                        total_size += 16 + chunk.data.len();
+                    }
+                    2 | 3 => {
+                        // Estimate string buffer sizes using helper function
+                        let id_len = estimate_string_buffer_size(chunk.id.as_ref());
+                        let group_len = estimate_string_buffer_size(chunk.group.as_ref());
+                        let meta_len = estimate_string_buffer_size(chunk.metadata.as_ref());
+                        total_size += id_len + group_len + meta_len + 12 + chunk.data.len();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    let mut buffers: Vec<u8> = Vec::with_capacity(total_size);
 
     for part in parts {
         match part {

@@ -61,7 +61,7 @@ pub struct CliCfg {
 
 fn print_help(){
     println!("Command Line Interface (CLI) arguments:");
-    println!(" {:14} {:10} {}" ,"KEY", "" ,"DESCRIPTION");
+    println!(" {:14} {:10} DESCRIPTION" ,"KEY", "");
     for arg in CLI_ARGS {
         let mut requires_value= "";
         if !arg.flag {
@@ -197,12 +197,10 @@ fn main_cli(replay_id: String, output_path: Option<String>, cfg: CliCfg){
             }else{
                 created_datetime.format("%+")
             }
+        }else if cfg.utc {
+            created_datetime.to_utc().format("%Y.%m.%d-%H.%M.%S")
         }else{
-            if cfg.utc {
-                created_datetime.to_utc().format("%Y.%m.%d-%H.%M.%S")
-            }else{
-                created_datetime.format("%Y.%m.%d-%H.%M.%S")
-            }
+            created_datetime.format("%Y.%m.%d-%H.%M.%S")
         };
 
         let replacement_char = if cfg.alt_name_scheme { "_" } else { "-" };
@@ -305,48 +303,45 @@ fn main(){
     // Process arguments & flags
     while let Some(arg) = args.next() {
 
-        match find_cli_arg(&arg) {
-            Some(arg) => {
+        if let Some(arg) = find_cli_arg(&arg) {
 
-                match arg.key {
-                    "-r" =>{
-                        if let Some(next) = args.next() {
-                            println!("Replay ID set to '{}'",next);
-                            cli_replay_id=Some(next);
-                        }else {
-                            println!("flag {} must have a value!",arg.key);
-                            return;
-                        }
-                    },
-                    "-o" =>{
-                        if let Some(next) = args.next() {
-                            println!("Output filename set to '{}'",next);
-                            cli_filepath=Some(next);
-                        }else {
-                            println!("flag {} must have a value!",arg.key);
-                            return;
-                        }
-                    },
-                    "--alt" => {
-                        cli_config.alt_name_scheme = true;
-                        println!("flag {} => Using alternate naming schema.", arg.key);
-                    },
-                    "--iso8601" => {
-                        cli_config.iso8601 = true;
-                        println!("flag {} => Using alternate date format (ISO8601)", arg.key);
-                    },
-                    "--utc" => {
-                        cli_config.utc = true;
-                        println!("flag {} => Using UTC timestamps", arg.key);
-                    },
-                    "-h" =>{
-                        print_help();
-                        exit(0);
-                    },
-                    _ => {}
-                }
-            },
-            None => {}
+            match arg.key {
+                "-r" =>{
+                    if let Some(next) = args.next() {
+                        println!("Replay ID set to '{}'",next);
+                        cli_replay_id=Some(next);
+                    }else {
+                        println!("flag {} must have a value!",arg.key);
+                        return;
+                    }
+                },
+                "-o" =>{
+                    if let Some(next) = args.next() {
+                        println!("Output filename set to '{}'",next);
+                        cli_filepath=Some(next);
+                    }else {
+                        println!("flag {} must have a value!",arg.key);
+                        return;
+                    }
+                },
+                "--alt" => {
+                    cli_config.alt_name_scheme = true;
+                    println!("flag {} => Using alternate naming schema.", arg.key);
+                },
+                "--iso8601" => {
+                    cli_config.iso8601 = true;
+                    println!("flag {} => Using alternate date format (ISO8601)", arg.key);
+                },
+                "--utc" => {
+                    cli_config.utc = true;
+                    println!("flag {} => Using UTC timestamps", arg.key);
+                },
+                "-h" =>{
+                    print_help();
+                    exit(0);
+                },
+                _ => {}
+            }
         }
     }
 
