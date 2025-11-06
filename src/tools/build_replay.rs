@@ -1,6 +1,10 @@
 use crate::tools::replay_processor::Chunk;
 use std::error::Error;
 
+// String buffers in replay format include: [int32 length][utf8 bytes][null terminator]
+// This adds approximately 5 bytes overhead (4 for length + 1 for null)
+const STRING_BUFFER_OVERHEAD: usize = 5;
+
 /// A part of the replay file: either the meta part or a chunk.
 pub enum ReplayPart {
     Meta(Vec<u8>),
@@ -41,9 +45,9 @@ pub fn build_replay(parts: &[ReplayPart]) -> Result<Vec<u8>, Box<dyn Error>> {
                     }
                     2 | 3 => {
                         // Estimate string buffer sizes
-                        let id_len = chunk.id.as_ref().map(|s| s.len() + 5).unwrap_or(5);
-                        let group_len = chunk.group.as_ref().map(|s| s.len() + 5).unwrap_or(5);
-                        let meta_len = chunk.metadata.as_ref().map(|s| s.len() + 5).unwrap_or(5);
+                        let id_len = chunk.id.as_ref().map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD);
+                        let group_len = chunk.group.as_ref().map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD);
+                        let meta_len = chunk.metadata.as_ref().map(|s| s.len() + STRING_BUFFER_OVERHEAD).unwrap_or(STRING_BUFFER_OVERHEAD);
                         total_size += id_len + group_len + meta_len + 12 + chunk.data.len();
                     }
                     _ => {}

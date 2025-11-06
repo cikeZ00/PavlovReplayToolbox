@@ -16,6 +16,10 @@ use crate::tools::build_replay::{build_replay, ReplayPart};
 
 pub const API_BASE_URL: &str = "https://tv.vankrupt.net";
 
+// Estimated number of events per replay for capacity pre-allocation
+// This is a heuristic based on typical replay patterns
+const ESTIMATED_EVENT_COUNT: usize = 50;
+
 #[derive(Debug, Clone, Default)]
 pub struct DownloadProgress {
     pub download: ProgressUpdate,
@@ -299,7 +303,7 @@ pub fn download_replay(
     
     // Pre-allocate download_chunks with expected capacity to avoid reallocations
     // 1 header + num_chunks stream chunks + estimated events
-    let mut download_chunks = Vec::with_capacity(1 + num_chunks + 50);
+    let mut download_chunks = Vec::with_capacity(1 + num_chunks + ESTIMATED_EVENT_COUNT);
     download_chunks.push(Chunk {
         data: header_data,
         chunk_type: 0,
