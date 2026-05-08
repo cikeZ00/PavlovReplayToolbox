@@ -668,7 +668,7 @@ impl ReplayApp {
                 update_build_progress(50, 100);
 
                 let formatted_date = created_datetime.format("%Y.%m.%d-%H.%M.%S");
-                let sanitized_name = metadata_result.friendly_name.replace([' ', '/', '\\', ':'], "-");
+                let sanitized_name = metadata_result.friendly_name.replace([' ','<','>',':','"','/',',','\\','?','*','='], "-");
                 let filename = format!(
                     "{}-{}-{}({}).replay",
                     sanitized_name,
