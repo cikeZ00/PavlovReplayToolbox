@@ -1097,9 +1097,12 @@ impl ReplayApp {
             }
             
             // Pavlov's game ID on mod.io is 3959
-            let url = format!("{}/games/3959/mods/{}?api_key={}", api_url, mod_id, api_token);
+            let url = format!("{}/games/3959/mods/{}", api_url, mod_id);
             
-            match client.get(&url).send() {
+            match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_token))
+            .send() {
                 Ok(response) => {
                     let status = response.status();
                     if status.is_success() {
