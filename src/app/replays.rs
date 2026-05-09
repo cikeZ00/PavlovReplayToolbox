@@ -6,6 +6,24 @@ use crate::tools::replay_processor::{ApiResponse, ReplayItem, API_BASE_URL};
 
 use super::ReplayApp;
 
+fn parse_replay_created_date(raw: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+    }
+
+    if let Ok(timestamp) = raw.parse::<i64>() {
+        if let Some(dt) = chrono::DateTime::from_timestamp(timestamp, 0) {
+            return dt.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
+        }
+    }
+
+    raw.to_string()
+}
+
 impl ReplayApp {
     fn fetch_replays(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let client = match Client::builder()
@@ -61,7 +79,7 @@ impl ReplayApp {
                 id: r.id,
                 game_mode: r.game_mode,
                 map_name: r.map_name,
-                created_date: r.created,
+                created_date: parse_replay_created_date(&r.created),
                 time_since: r.time_since,
                 shack: r.shack,
                 modcount: r.modcount,
