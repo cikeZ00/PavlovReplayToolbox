@@ -19,6 +19,7 @@ pub fn render_settings_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
                 if app.styled_button(ui, "Browse").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         app.settings.download_dir = path;
+                        app.mark_downloaded_replay_cache_dirty();
                         if let Err(err) = app.save_settings() {
                             app.show_error(format!("Error saving settings: {}", err));
                         } else {
