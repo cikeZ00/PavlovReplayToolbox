@@ -65,6 +65,7 @@ pub struct ReplayItem {
     #[allow(dead_code)]
     pub live: bool,
     pub users: Vec<String>,
+    pub expires_date: String,
 }
 
 pub struct Config {
