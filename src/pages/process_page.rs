@@ -6,6 +6,7 @@ pub fn render_process_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
     ui.separator();
 
     egui::ScrollArea::vertical()
+        .id_salt("process_page_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             ui.group(|ui| {

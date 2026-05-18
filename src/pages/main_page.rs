@@ -107,6 +107,7 @@ pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
     let full_width = ui.available_width();
 
     egui::ScrollArea::vertical()
+        .id_salt("main_page_replays_scroll")
         .auto_shrink([false; 2])
         .show_rows(ui, replay_item_height, filtered_replays_len, |ui, row_range| {
             if filtered_replays_len == 0 {
