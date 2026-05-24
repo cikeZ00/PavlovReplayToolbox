@@ -165,6 +165,7 @@ pub fn render_manage_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context)
     let replay_item_height = frame_vertical_margin + content_height + row_spacing;
 
     egui::ScrollArea::vertical()
+        .id_salt("manage_page_replays_scroll")
         .auto_shrink([false; 2])
         .show_rows(ui, replay_item_height, downloaded_replays.len(), |ui, row_range| {
             let mut to_delete: Option<usize> = None;

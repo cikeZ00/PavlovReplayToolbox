@@ -5,6 +5,8 @@ use crate::core::PlatformFilter;
 use crate::tools::replay_processor::ReplayItem;
 
 pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
+    ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
     let mut filters_changed = false;
     ui.horizontal(|ui| {
         ui.heading("Replay Downloader");
@@ -105,6 +107,7 @@ pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
     let full_width = ui.available_width();
 
     egui::ScrollArea::vertical()
+        .id_salt("main_page_replays_scroll")
         .auto_shrink([false; 2])
         .show_rows(ui, replay_item_height, filtered_replays_len, |ui, row_range| {
             if filtered_replays_len == 0 {
@@ -408,6 +411,42 @@ fn render_replay_item_contents(
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.label("Time Since:");
             ui.label(format!("{}s", replay.time_since));
+            ui.separator();
+            ui.label("Expires in:");
+
+            let expires_in = match chrono::NaiveDateTime::parse_from_str(
+                &replay.expires_date,
+                "%Y-%m-%d %H:%M:%S",
+            ) {
+                Ok(expiration_dt) => {
+                    let now = chrono::Local::now().naive_local();
+                    if expiration_dt > now {
+                        let duration = expiration_dt - now;
+                        let total_seconds = duration.num_seconds().max(0);
+                        let days = total_seconds / 86_400;
+                        let hours = (total_seconds % 86_400) / 3_600;
+                        let minutes = (total_seconds % 3_600) / 60;
+                        let seconds = total_seconds % 60;
+
+                        if days > 0 {
+                            format!(
+                                "{}d {:02}h {:02}m {:02}s",
+                                days, hours, minutes, seconds
+                            )
+                        } else if hours > 0 {
+                            format!("{}h {:02}m {:02}s", hours, minutes, seconds)
+                        } else {
+                            format!("{}m {:02}s", minutes, seconds)
+                        }
+                    } else {
+                        "Expired".to_string()
+                    }
+                }
+                Err(_) => "Unknown".to_string(),
+            };
+
+            ui.label(expires_in);
+
         });
 
         ui.separator();

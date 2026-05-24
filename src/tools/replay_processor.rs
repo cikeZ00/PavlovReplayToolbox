@@ -1,7 +1,8 @@
 use chrono::DateTime;
 use rayon::prelude::*;
-use reqwest::blocking::{Client, Response};
-use serde::{Deserialize, Serialize};
+use reqwest::blocking::Client;
+use reqwest::StatusCode;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     error::Error,
     fs,
@@ -65,6 +66,7 @@ pub struct ReplayItem {
     #[allow(dead_code)]
     pub live: bool,
     pub users: Vec<String>,
+    pub expires_date: String,
 }
 
 pub struct Config {
@@ -175,53 +177,183 @@ pub struct Chunk {
     pub size_in_bytes: Option<i32>,
 }
 
-fn get_with_retry(
+fn should_retry_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT
+}
+
+fn get_json<T: DeserializeOwned>(
     client: &Client,
     url: &str,
     max_retries: u32,
-) -> Result<Response, Box<dyn Error + Send + Sync>> {
+) -> Result<T, Box<dyn Error + Send + Sync>> {
     let mut attempt = 0;
     let mut backoff = Duration::from_secs(2);
     loop {
+        attempt += 1;
         match client.get(url).send() {
-            Ok(resp) if resp.status().is_success() => return Ok(resp),
             Ok(resp) => {
-                return Err(format!("GET {} failed with status: {}", url, resp.status()).into());
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.json::<T>() {
+                        Ok(value) => return Ok(value),
+                        Err(e) => {
+                            if attempt >= max_retries {
+                                return Err(format!(
+                                    "GET {} failed after {} attempts: {}",
+                                    url, attempt, e
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                } else if !should_retry_status(status) || attempt >= max_retries {
+                    return Err(format!("GET {} failed with status: {}", url, status).into());
+                }
             }
             Err(e) => {
-                attempt += 1;
                 if attempt >= max_retries {
                     return Err(format!("GET {} failed after {} attempts: {}", url, attempt, e).into());
                 }
-                sleep(backoff);
-                backoff *= 2;
             }
         }
+
+        sleep(backoff);
+        backoff *= 2;
     }
 }
 
-fn post_with_retry(
+fn post_json<T: DeserializeOwned>(
     client: &Client,
     url: &str,
     max_retries: u32,
-) -> Result<Response, Box<dyn Error + Send + Sync>> {
+) -> Result<T, Box<dyn Error + Send + Sync>> {
     let mut attempt = 0;
     let mut backoff = Duration::from_secs(2);
     loop {
+        attempt += 1;
         match client.post(url).send() {
-            Ok(resp) if resp.status().is_success() => return Ok(resp),
             Ok(resp) => {
-                return Err(format!("POST {} failed with status: {}", url, resp.status()).into());
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.json::<T>() {
+                        Ok(value) => return Ok(value),
+                        Err(e) => {
+                            if attempt >= max_retries {
+                                return Err(format!(
+                                    "POST {} failed after {} attempts: {}",
+                                    url, attempt, e
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                } else if !should_retry_status(status) || attempt >= max_retries {
+                    return Err(format!("POST {} failed with status: {}", url, status).into());
+                }
             }
             Err(e) => {
-                attempt += 1;
                 if attempt >= max_retries {
                     return Err(format!("POST {} failed after {} attempts: {}", url, attempt, e).into());
                 }
-                sleep(backoff);
-                backoff *= 2;
             }
         }
+
+        sleep(backoff);
+        backoff *= 2;
+    }
+}
+
+fn get_bytes(
+    client: &Client,
+    url: &str,
+    max_retries: u32,
+) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    let mut attempt = 0;
+    let mut backoff = Duration::from_secs(2);
+    loop {
+        attempt += 1;
+        match client.get(url).send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.bytes() {
+                        Ok(bytes) => return Ok(bytes.to_vec()),
+                        Err(e) => {
+                            if attempt >= max_retries {
+                                return Err(format!(
+                                    "GET {} failed after {} attempts: {}",
+                                    url, attempt, e
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                } else if !should_retry_status(status) || attempt >= max_retries {
+                    return Err(format!("GET {} failed with status: {}", url, status).into());
+                }
+            }
+            Err(e) => {
+                if attempt >= max_retries {
+                    return Err(format!("GET {} failed after {} attempts: {}", url, attempt, e).into());
+                }
+            }
+        }
+
+        sleep(backoff);
+        backoff *= 2;
+    }
+}
+
+fn get_chunk(
+    client: &Client,
+    url: &str,
+    max_retries: u32,
+) -> Result<(Vec<u8>, Option<i32>, Option<i32>), Box<dyn Error + Send + Sync>> {
+    let mut attempt = 0;
+    let mut backoff = Duration::from_secs(2);
+    loop {
+        attempt += 1;
+        match client.get(url).send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    let time1 = resp
+                        .headers()
+                        .get("mtime1")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse().ok());
+                    let time2 = resp
+                        .headers()
+                        .get("mtime2")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse().ok());
+                    match resp.bytes() {
+                        Ok(bytes) => return Ok((bytes.to_vec(), time1, time2)),
+                        Err(e) => {
+                            if attempt >= max_retries {
+                                return Err(format!(
+                                    "GET {} failed after {} attempts: {}",
+                                    url, attempt, e
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                } else if !should_retry_status(status) || attempt >= max_retries {
+                    return Err(format!("GET {} failed with status: {}", url, status).into());
+                }
+            }
+            Err(e) => {
+                if attempt >= max_retries {
+                    return Err(format!("GET {} failed after {} attempts: {}", url, attempt, e).into());
+                }
+            }
+        }
+
+        sleep(backoff);
+        backoff *= 2;
     }
 }
 
@@ -248,7 +380,7 @@ pub fn download_replay(
     // Loop through available pages to find the matching replay.
     while find_all_response.is_none() {
         let url = format!("{}/find/?game=all&offset={}&live=false", SERVER, offset);
-        let find_all: ApiResponse = get_with_retry(&client, &url, max_retries)?.json()?;
+        let find_all: ApiResponse = get_json(&client, &url, max_retries)?;
 
         find_all_response = find_all
             .replays
@@ -267,7 +399,7 @@ pub fn download_replay(
     
     let start_url = format!("{}/replay/{}/startDownloading?user", SERVER, replay_id);
     let start_download: serde_json::Value =
-        post_with_retry(&client, &start_url, max_retries)?.json()?;
+        post_json(&client, &start_url, max_retries)?;
     replay_data.insert("start_downloading".into(), start_download.clone());
 
     if start_download["state"] != "Recorded" {
@@ -292,7 +424,7 @@ pub fn download_replay(
     
     // Download header
     let header_url = format!("{}/replay/{}/file/replay.header", SERVER, replay_id);
-    let header_data = get_with_retry(&client, &header_url, max_retries)?.bytes()?.to_vec();
+    let header_data = get_bytes(&client, &header_url, max_retries)?;
     
     completed_components += 1;
     update_progress(completed_components);
@@ -310,21 +442,33 @@ pub fn download_replay(
     });
 
     // Get metadata
-    let meta: MetaData = get_with_retry(&client, &format!("{}/meta/{}", SERVER, replay_id), max_retries)?.json()?;
+    let meta: MetaData = get_json(
+        &client,
+        &format!("{}/meta/{}", SERVER, replay_id),
+        max_retries,
+    )?;
     replay_data.insert("meta".into(), serde_json::to_value(&meta)?);
     
     completed_components += 1;
     update_progress(completed_components);
 
     // Get events
-    let events: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id), max_retries)?.json()?;
+    let events: EventsWrapper = get_json(
+        &client,
+        &format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id),
+        max_retries,
+    )?;
     replay_data.insert("events".into(), serde_json::to_value(&events)?);
     
     completed_components += 1;
     update_progress(completed_components);
 
     // Get Pavlov events
-    let events_pavlov: EventsWrapper = get_with_retry(&client, &format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id), max_retries)?.json()?;
+    let events_pavlov: EventsWrapper = get_json(
+        &client,
+        &format!("{}/replay/{}/event?group=Pavlov", SERVER, replay_id),
+        max_retries,
+    )?;
     replay_data.insert("events_pavlov".into(), serde_json::to_value(&events_pavlov)?);
     
     completed_components += 1;
@@ -341,16 +485,7 @@ pub fn download_replay(
             let chunk_url = format!("{}/replay/{}/file/stream.{}", SERVER, replay_id, i);
             
             // Each parallel thread uses the same client instance.
-            let response = get_with_retry(&client, &chunk_url, max_retries)?;
-            let time1 = response.headers()
-                .get("mtime1")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok());
-            let time2 = response.headers()
-                .get("mtime2")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok());
-            let chunk_data = response.bytes()?.to_vec();
+            let (chunk_data, time1, time2) = get_chunk(&client, &chunk_url, max_retries)?;
 
             // Update progress after each chunk is downloaded
             let downloaded = downloaded_chunks.fetch_add(1, Ordering::SeqCst) + 1;
