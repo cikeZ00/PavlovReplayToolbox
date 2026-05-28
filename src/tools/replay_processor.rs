@@ -453,11 +453,17 @@ pub fn download_replay(
     update_progress(completed_components);
 
     // Get events
-    let events: EventsWrapper = get_json(
+    let events: EventsWrapper = match get_json(
         &client,
         &format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id),
         max_retries,
-    )?;
+    ) //? 
+      //(THIS IS A HACK TO AVOID FAILING THE ENTIRE DOWNLOAD IF CHECKPOINT EVENTS ARE UNAVAILABLE) 
+      // Vankrupt's server can and will shit itself and treturn 502 errors on this endpoint.
+    {
+        Ok(events) => events,
+        Err(_) => EventsWrapper { events: Vec::new() },
+    };
     replay_data.insert("events".into(), serde_json::to_value(&events)?);
     
     completed_components += 1;
