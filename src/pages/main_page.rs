@@ -1,8 +1,9 @@
 use eframe::egui::{self, Context};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::app::ReplayApp;
 use crate::core::PlatformFilter;
-use crate::tools::replay_processor::ReplayItem;
+use crate::tools::replay_processor::{DownloadProgress, ReplayItem};
 
 pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
     ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -100,6 +101,14 @@ pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
         app.rebuild_filtered_replays();
     }
 
+    let progress_snapshot = app
+        .download_progress
+        .lock()
+        .map(|progress| progress.clone())
+        .unwrap_or_default();
+    let active_downloads = app.active_downloads.clone();
+    let queued_downloads = app.download_queue.clone();
+
     let filtered_replays_len = app.filtered_replays().len();
 
     let replay_item_height = 200.0;
@@ -127,7 +136,16 @@ pub fn render_main_page(app: &mut ReplayApp, ui: &mut egui::Ui, ctx: &Context) {
                             .max_rect(rect)  
                             .layout(egui::Layout::top_down(egui::Align::Center)),
                         |ui| {
-                            render_replay_item_with_width(app, ui, ctx, &replay, rect.width());
+                            render_replay_item_with_width(
+                                app,
+                                ui,
+                                ctx,
+                                &replay,
+                                rect.width(),
+                                &progress_snapshot,
+                                &active_downloads,
+                                &queued_downloads,
+                            );
                         },
                     );
                     ui.add_space(4.0);
@@ -192,6 +210,9 @@ fn render_replay_item_with_width(
     ctx: &Context,
     replay: &ReplayItem,
     width: f32,
+    progress_snapshot: &HashMap<String, DownloadProgress>,
+    active_downloads: &HashSet<String>,
+    queued_downloads: &VecDeque<String>,
 ) {
     ui.push_id(replay.id.as_str(), |ui| {
         egui::Frame::new()
@@ -202,7 +223,15 @@ fn render_replay_item_with_width(
                     .inner_margin(egui::Margin::symmetric(8, 0)) 
                     .show(ui, |ui| {
                         ui.set_width(width - 16.0); 
-                        render_replay_item_contents(app, ui, ctx, replay);
+                        render_replay_item_contents(
+                            app,
+                            ui,
+                            ctx,
+                            replay,
+                            progress_snapshot,
+                            active_downloads,
+                            queued_downloads,
+                        );
                     });
             });
     });
@@ -212,7 +241,10 @@ fn render_replay_item_contents(
     app: &mut ReplayApp,
     ui: &mut egui::Ui,
     ctx: &Context,
-    replay: &ReplayItem
+    replay: &ReplayItem,
+    progress_snapshot: &HashMap<String, DownloadProgress>,
+    active_downloads: &HashSet<String>,
+    queued_downloads: &VecDeque<String>,
 ) {
     ui.vertical(|ui| {
         ui.add_space(8.0);
@@ -232,10 +264,8 @@ fn render_replay_item_contents(
                 });
             
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let is_downloading = app.downloading_replay_id
-                    .as_ref()
-                    .map_or(false, |id| id == &replay.id);
-                
+                let is_active = active_downloads.contains(&replay.id);
+                let queue_position = queued_downloads.iter().position(|id| id == &replay.id);
                 let is_downloaded = app.downloaded_replays.contains(&replay.id);
 
                 if is_downloaded {
@@ -248,17 +278,60 @@ fn render_replay_item_contents(
                                     .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
                             );
                         });
-                } else if !is_downloading {
+                } else if is_active {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin { top: 8, left: 0, right: 0, bottom: 0 })
+                        .show(ui, |ui| {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new("Downloading")
+                                    .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
+                            );
+                        });
+                } else if queue_position.is_some() {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin { top: 8, left: 0, right: 0, bottom: 0 })
+                        .show(ui, |ui| {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new("Queued")
+                                    .min_size(egui::vec2(ui.available_width().min(120.0), 32.0))
+                            );
+                        });
+                } else {
                     egui::Frame::new()
                         .inner_margin(egui::Margin { top: 8, left: 0, right: 0, bottom: 0 })
                         .show(ui, |ui| {
                             if app.styled_button(ui, "Download & Process").clicked() {
-                                app.process_online_replay(&replay.id);
+                                app.queue_download(&replay.id);
                             }
                         });
                 }
             });
         });
+
+        let queue_position = queued_downloads.iter().position(|id| id == &replay.id);
+        let is_active = active_downloads.contains(&replay.id);
+        if is_active {
+            if let Some(progress) = progress_snapshot.get(&replay.id) {
+                ui.add(
+                    egui::ProgressBar::new(progress.download.progress())
+                        .show_percentage()
+                        .text("Downloading"),
+                );
+                if progress.build.max > 0 {
+                    ui.add(
+                        egui::ProgressBar::new(progress.build.progress())
+                            .show_percentage()
+                            .text("Building"),
+                    );
+                }
+            } else {
+                ui.label("Starting download...");
+            }
+        } else if let Some(position) = queue_position {
+            ui.label(format!("Queued (position {})", position + 1));
+        }
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;

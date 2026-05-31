@@ -20,8 +20,6 @@ impl App for ReplayApp {
 
         ui::update_notifications(self);
 
-        ui::render_download_progress(self, ctx);
-
         while let Ok((user, color_image)) = self.profile_rx.try_recv() {
             let texture_handle = ctx.load_texture(
                 &format!("avatar_{}", user),
@@ -58,7 +56,23 @@ impl App for ReplayApp {
             self.downloaded_replays.insert(replay_id.clone());
             self.mark_downloaded_replay_cache_dirty();
             self.show_success(format!("Replay {} downloaded successfully", replay_id));
+            self.active_downloads.remove(&replay_id);
+            self.download_errors.remove(&replay_id);
+            if let Ok(mut progress_map) = self.download_progress.lock() {
+                progress_map.remove(&replay_id);
+            }
         }
+
+        while let Ok((replay_id, error)) = self.download_error_rx.try_recv() {
+            self.active_downloads.remove(&replay_id);
+            self.download_errors.insert(replay_id.clone(), error.clone());
+            if let Ok(mut progress_map) = self.download_progress.lock() {
+                progress_map.remove(&replay_id);
+            }
+            self.show_error(format!("Replay {} failed: {}", replay_id, error));
+        }
+
+        self.start_queued_downloads();
 
         ui::render_completion_dialog(self, ctx);
 
@@ -74,18 +88,13 @@ impl App for ReplayApp {
             }
         }
 
-        if self.is_downloading && self.downloading_replay_id.is_none() {
-            self.is_downloading = false;
-        }
-
         if self.settings.auto_refresh_enabled
             && self.last_refresh_time.elapsed() > Duration::from_secs(self.settings.auto_refresh_interval_mins * 60)
             && self.current_page == Page::Main
-            && !self.is_downloading
+            && self.active_downloads.is_empty()
         {
             self.refresh_replays();
         } else if self.settings.auto_download_enabled
-            && !self.is_downloading
             && self.current_page == Page::Main
         {
             self.check_auto_download_triggers();
@@ -95,8 +104,8 @@ impl App for ReplayApp {
 
         let has_loading_mods = self.mod_info_cache.values().any(|m| m.is_loading);
         let needs_repaint = self.is_processing_local
-            || self.is_downloading
-            || self.downloading_replay_id.is_some()
+            || !self.active_downloads.is_empty()
+            || !self.download_queue.is_empty()
             || !self.loading_profiles.is_empty()
             || !self.loading_thumbnails.is_empty()
             || has_loading_mods
@@ -106,7 +115,7 @@ impl App for ReplayApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         } else if self.settings.auto_refresh_enabled
             && self.current_page == Page::Main
-            && !self.is_downloading
+            && self.active_downloads.is_empty()
         {
             let refresh_interval = Duration::from_secs(self.settings.auto_refresh_interval_mins * 60);
             let elapsed = self.last_refresh_time.elapsed();

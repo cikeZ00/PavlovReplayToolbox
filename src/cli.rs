@@ -218,6 +218,7 @@ pub fn main_cli(replay_id: String, output_path: Option<String>, cfg: CliCfg) {
             &output_file,
             Some(metadata_result),
             None,
+            None,
         )
         .map_err(|e| format!("Failed to download replay data: {}", e))?;
 

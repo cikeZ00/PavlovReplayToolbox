@@ -41,7 +41,7 @@ pub fn render_settings_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
             });
 
             section(ui, "Downloading", |ui| {
-                settings_row(ui, "Disk cache", "Allow resumable downloads using disk cache (When disabled, chunks are downloaded to RAM.)", |ui| {
+                settings_row(ui, "Disk cache (On-disk processing)", "Allow resumable downloads using disk cache (When disabled, chunks are downloaded to RAM.)", |ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(12.0);
                         ui.checkbox(&mut app.settings.download_use_disk_cache, "");
@@ -64,6 +64,28 @@ pub fn render_settings_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
                                 .clamping(egui::SliderClamping::Always)
                                 .show_value(true),
                         );
+                    });
+                });
+
+                let max_concurrent = 8usize.max(1);
+                app.settings.download_concurrency =
+                    app.settings.download_concurrency.clamp(1, max_concurrent);
+
+                settings_row(ui, "Concurrent downloads", "How many replays can download at once", |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(12.0);
+                        ui.add(
+                            egui::Slider::new(&mut app.settings.download_concurrency, 1..=max_concurrent)
+                                .clamping(egui::SliderClamping::Always)
+                                .show_value(true),
+                        );
+                    });
+                });
+
+                settings_row(ui, "Retry downloads", "Retry failed downloads until they complete", |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(12.0);
+                        ui.checkbox(&mut app.settings.download_retry_enabled, "");
                     });
                 });
             });

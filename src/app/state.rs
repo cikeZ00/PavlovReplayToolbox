@@ -1,7 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
+    sync::{mpsc, Arc, Mutex},
     time::Instant,
 };
 
@@ -12,6 +12,8 @@ use crate::tools::replay_processor::{DownloadProgress, Progress};
 
 type DownloadedReplaysSender = mpsc::Sender<String>;
 type DownloadedReplaysReceiver = mpsc::Receiver<String>;
+type DownloadErrorSender = mpsc::Sender<(String, String)>;
+type DownloadErrorReceiver = mpsc::Receiver<(String, String)>;
 type UpdateInfoReceiver = mpsc::Receiver<UpdateInfo>;
 
 #[derive(Clone)]
@@ -39,6 +41,7 @@ pub enum Page {
     ProcessLocal,
     Settings,
     Manage,
+    Downloads,
 }
 
 pub struct ReplayApp {
@@ -54,11 +57,15 @@ pub struct ReplayApp {
     pub(crate) loading_profiles: HashSet<String>,
     pub(crate) profile_tx: mpsc::Sender<(String, egui::ColorImage)>,
     pub(crate) profile_rx: mpsc::Receiver<(String, egui::ColorImage)>,
-    pub(crate) download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub downloading_replay_id: Option<String>,
+    pub(crate) download_progress: Arc<Mutex<HashMap<String, DownloadProgress>>>,
+    pub(crate) download_queue: VecDeque<String>,
+    pub(crate) active_downloads: HashSet<String>,
+    pub(crate) download_errors: HashMap<String, String>,
     pub downloaded_replays: HashSet<String>,
     pub(crate) downloaded_tx: DownloadedReplaysSender,
     pub(crate) downloaded_rx: DownloadedReplaysReceiver,
+    pub(crate) download_error_tx: DownloadErrorSender,
+    pub(crate) download_error_rx: DownloadErrorReceiver,
     pub settings: Settings,
     pub(crate) last_refresh_time: Instant,
     pub(crate) downloaded_replay_cache: Vec<DownloadedReplayInfo>,
@@ -80,6 +87,7 @@ impl ReplayApp {
     pub fn new(_cc: &CreationContext<'_>) -> Self {
         let (profile_tx, profile_rx) = mpsc::channel();
         let (downloaded_tx, downloaded_rx) = mpsc::channel();
+        let (download_error_tx, download_error_rx) = mpsc::channel();
         let (update_tx, update_rx) = mpsc::channel();
         let (mod_info_tx, mod_info_rx) = mpsc::channel();
         let (mod_thumbnail_tx, mod_thumbnail_rx) = mpsc::channel();
@@ -99,11 +107,15 @@ impl ReplayApp {
             loading_profiles: HashSet::new(),
             profile_tx,
             profile_rx,
-            download_progress: Arc::new(Mutex::new(None)),
-            downloading_replay_id: None,
+            download_progress: Arc::new(Mutex::new(HashMap::new())),
+            download_queue: VecDeque::new(),
+            active_downloads: HashSet::new(),
+            download_errors: HashMap::new(),
             downloaded_replays: HashSet::new(),
             downloaded_tx,
             downloaded_rx,
+            download_error_tx,
+            download_error_rx,
             settings,
             last_refresh_time: Instant::now(),
             downloaded_replay_cache: Vec::new(),

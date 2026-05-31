@@ -1,28 +1,34 @@
 use crate::tools::replay_processor::ReplayItem;
 
-#[derive(Clone, Default)]
-pub struct ReplayFilters {
-    pub game_mode: String,
-    pub map_name: String,
-    pub workshop_mods: String,
-    pub platform: PlatformFilter,
-    pub user_id: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformFilter {
     All,
     Quest,
     PC,
 }
 
-impl Default for PlatformFilter {
+#[derive(Debug, Clone)]
+pub struct ReplayFilters {
+    pub game_mode: String,
+    pub map_name: String,
+    pub workshop_mods: String,
+    pub user_id: String,
+    pub platform: PlatformFilter,
+}
+
+impl Default for ReplayFilters {
     fn default() -> Self {
-        Self::All
+        Self {
+            game_mode: String::new(),
+            map_name: String::new(),
+            workshop_mods: String::new(),
+            user_id: String::new(),
+            platform: PlatformFilter::All,
+        }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReplayListState {
     pub replays: Vec<ReplayItem>,
     pub filtered_replays: Vec<ReplayItem>,
@@ -31,36 +37,48 @@ pub struct ReplayListState {
     pub filters: ReplayFilters,
 }
 
+impl Default for ReplayListState {
+    fn default() -> Self {
+        Self {
+            replays: Vec::new(),
+            filtered_replays: Vec::new(),
+            current_page: 0,
+            total_pages: 0,
+            filters: ReplayFilters::default(),
+        }
+    }
+}
+
 pub fn rebuild_filtered_replays(state: &mut ReplayListState) {
-    let filter_game_mode = state.filters.game_mode.to_lowercase();
-    let filter_map_name = state.filters.map_name.to_lowercase();
-    let filter_mods = state.filters.workshop_mods.to_lowercase();
-    let filter_user_id = state.filters.user_id.to_lowercase();
+    let game_mode_filter = state.filters.game_mode.to_lowercase();
+    let map_filter = state.filters.map_name.to_lowercase();
+    let mods_filter = state.filters.workshop_mods.to_lowercase();
+    let user_filter = state.filters.user_id.to_lowercase();
+    let platform_filter = state.filters.platform;
 
-    state.filtered_replays = state.replays.iter()
-        .filter(|replay| {
-            if !filter_game_mode.is_empty() &&
-               !replay.game_mode.to_lowercase().contains(&filter_game_mode) {
-                return false;
-            }
-
-            if !filter_map_name.is_empty() &&
-               !replay.map_name.to_lowercase().contains(&filter_map_name) {
-                return false;
-            }
-
-            if !filter_mods.is_empty() &&
-               !replay.workshop_mods.to_lowercase().contains(&filter_mods) {
-                return false;
-            }
-
-            if !filter_user_id.is_empty() &&
-               !replay.users.iter().any(|user| user.to_lowercase().contains(&filter_user_id)) {
-                return false;
-            }
-
-            true
-        })
+    state.filtered_replays = state
+        .replays
+        .iter()
         .cloned()
+        .filter(|replay| {
+            let game_mode_ok = game_mode_filter.is_empty()
+                || replay.game_mode.to_lowercase().contains(&game_mode_filter);
+            let map_ok = map_filter.is_empty()
+                || replay.map_name.to_lowercase().contains(&map_filter);
+            let mods_ok = mods_filter.is_empty()
+                || replay.workshop_mods.to_lowercase().contains(&mods_filter);
+            let user_ok = user_filter.is_empty()
+                || replay
+                    .users
+                    .iter()
+                    .any(|user| user.to_lowercase().contains(&user_filter));
+            let platform_ok = match platform_filter {
+                PlatformFilter::All => true,
+                PlatformFilter::Quest => replay.shack,
+                PlatformFilter::PC => !replay.shack,
+            };
+
+            game_mode_ok && map_ok && mods_ok && user_ok && platform_ok
+        })
         .collect();
 }
