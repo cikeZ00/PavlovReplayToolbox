@@ -35,6 +35,33 @@ pub fn render_settings_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
     });
     
     ui.add_space(16.0);
+
+    // Download behavior settings
+    ui.group(|ui| {
+        ui.vertical(|ui| {
+            ui.heading("Download Behavior");
+
+            ui.checkbox(
+                &mut app.settings.download_use_disk_cache,
+                "Use disk cache while downloading (resumable)",
+            );
+
+            let max_threads = std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(8)
+                .max(1);
+            app.settings.download_thread_count =
+                app.settings.download_thread_count.clamp(1, max_threads);
+            ui.add(
+                egui::Slider::new(&mut app.settings.download_thread_count, 1..=max_threads)
+                    .text("Download threads")
+                    .clamping(egui::SliderClamping::Always),
+            );
+
+            ui.add_space(4.0);
+            ui.label("Disk cache allows resuming partial downloads; Toggling this option off will store chunks in RAM (Not resumable).");
+        });
+    });
     
     // Auto refresh settings
     ui.group(|ui| {
