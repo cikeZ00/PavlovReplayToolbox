@@ -41,7 +41,7 @@ pub fn render_settings_page(app: &mut ReplayApp, ui: &mut egui::Ui) {
             });
 
             section(ui, "Downloading", |ui| {
-                settings_row(ui, "Disk cache", "Allow resumable downloads using disk cache", |ui| {
+                settings_row(ui, "Disk cache", "Allow resumable downloads using disk cache (When disabled, chunks are downloaded to RAM.)", |ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(12.0);
                         ui.checkbox(&mut app.settings.download_use_disk_cache, "");
