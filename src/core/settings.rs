@@ -13,6 +13,14 @@ fn default_download_thread_count() -> usize {
         .unwrap_or(4)
 }
 
+fn default_download_concurrency() -> usize {
+    1
+}
+
+fn default_download_retry_enabled() -> bool {
+    true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub download_dir: PathBuf,
@@ -20,6 +28,10 @@ pub struct Settings {
     pub download_use_disk_cache: bool,
     #[serde(default = "default_download_thread_count")]
     pub download_thread_count: usize,
+    #[serde(default = "default_download_concurrency")]
+    pub download_concurrency: usize,
+    #[serde(default = "default_download_retry_enabled")]
+    pub download_retry_enabled: bool,
     pub auto_refresh_enabled: bool,
     pub auto_refresh_interval_mins: u64,
     pub auto_download_enabled: bool,
@@ -34,6 +46,8 @@ impl Default for Settings {
             download_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             download_use_disk_cache: default_download_use_disk_cache(),
             download_thread_count: default_download_thread_count(),
+            download_concurrency: default_download_concurrency(),
+            download_retry_enabled: default_download_retry_enabled(),
             auto_refresh_enabled: true,
             auto_refresh_interval_mins: 5,
             auto_download_enabled: false,

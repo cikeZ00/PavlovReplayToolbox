@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::tools::build_meta::build_meta;
-use crate::tools::build_replay::{build_replay, write_part, ReplayPart};
+use crate::tools::build_replay::{append_part, build_replay, write_part, ReplayPart};
 
 pub const API_BASE_URL: &str = "https://tv.vankrupt.net";
 
@@ -526,6 +526,7 @@ pub fn download_replay(
     replay_id: &str,
     options: DownloadOptions,
     progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
+    build_progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
 ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     // Validate replay id (only accept alphanumeric IDs)
     if !replay_id.chars().all(|c| c.is_alphanumeric()) {
@@ -722,14 +723,36 @@ pub fn download_replay(
     // Build the replay by first constructing the meta buffer and then appending each chunk.
     let meta_buffer = build_meta(&meta)
         .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })?;
-    let mut parts = vec![ReplayPart::Meta(meta_buffer)];
-    parts.extend(download_chunks.into_iter().map(ReplayPart::Chunk));
+    let build_total = (download_chunks.len() + 1).max(1);
+    let mut build_current = 0usize;
+    let update_build = |current: usize| {
+        if let Some(callback) = &build_progress_callback {
+            callback(current, build_total);
+        }
+    };
+    update_build(build_current);
+
+    let mut buffers = Vec::new();
+    let mut append = |part: ReplayPart| -> Result<(), Box<dyn Error + Send + Sync>> {
+        append_part(&mut buffers, &part)
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })
+    };
+
+    append(ReplayPart::Meta(meta_buffer))?;
+    build_current += 1;
+    update_build(build_current);
+
+    for chunk in download_chunks {
+        append(ReplayPart::Chunk(chunk))?;
+        build_current += 1;
+        update_build(build_current);
+    }
 
     // Final progress update
     update_progress(total_components);
+    update_build(build_total);
 
-    build_replay(parts)
-        .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })
+    Ok(buffers)
 }
 
 pub fn download_replay_to_path(
@@ -738,6 +761,7 @@ pub fn download_replay_to_path(
     output_path: &Path,
     meta_override: Option<MetaData>,
     progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
+    build_progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Validate replay id (only accept alphanumeric IDs)
     if !replay_id.chars().all(|c| c.is_alphanumeric()) {
@@ -869,6 +893,25 @@ pub fn download_replay_to_path(
         events_pavlov
     };
 
+    let event_chunks = events
+        .events
+        .iter()
+        .filter(|event| event.data.as_ref().and_then(|d| d.data.as_ref()).is_some())
+        .count();
+    let pavlov_chunks = events_pavlov
+        .events
+        .iter()
+        .filter(|event| event.data.as_ref().and_then(|d| d.data.as_ref()).is_some())
+        .count();
+    let build_total = (2 + num_chunks + event_chunks + pavlov_chunks).max(1);
+    let mut build_current = 0usize;
+    let update_build = |current: usize| {
+        if let Some(callback) = &build_progress_callback {
+            callback(current, build_total);
+        }
+    };
+    update_build(build_current);
+
     completed_components += 1;
     update_progress(completed_components);
 
@@ -947,6 +990,8 @@ pub fn download_replay_to_path(
     let meta_buffer = build_meta(&meta)
         .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })?;
     write(ReplayPart::Meta(meta_buffer))?;
+    build_current += 1;
+    update_build(build_current);
 
     let header_data = fs::read(&header_path)?;
     write(ReplayPart::Chunk(Chunk {
@@ -959,6 +1004,8 @@ pub fn download_replay_to_path(
         metadata: None,
         size_in_bytes: None,
     }))?;
+    build_current += 1;
+    update_build(build_current);
 
     for i in 0..num_chunks {
         let chunk_path = cache_dir.join(format!("stream.{}", i));
@@ -975,6 +1022,8 @@ pub fn download_replay_to_path(
             metadata: None,
             size_in_bytes: None,
         }))?;
+        build_current += 1;
+        update_build(build_current);
     }
 
     for event in events.events {
@@ -989,6 +1038,8 @@ pub fn download_replay_to_path(
                 metadata: event.meta,
                 size_in_bytes: None,
             }))?;
+            build_current += 1;
+            update_build(build_current);
         }
     }
 
@@ -1004,10 +1055,13 @@ pub fn download_replay_to_path(
                 metadata: event.meta,
                 size_in_bytes: None,
             }))?;
+            build_current += 1;
+            update_build(build_current);
         }
     }
 
     writer.flush()?;
+    update_build(build_total);
 
     if output_path.exists() {
         fs::remove_file(output_path)?;

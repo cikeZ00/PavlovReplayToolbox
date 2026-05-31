@@ -121,8 +121,7 @@ impl ReplayApp {
 
     pub(crate) fn check_auto_download_triggers(&mut self) {
         if !self.settings.auto_download_enabled
-            || self.settings.auto_download_trigger_user_id.is_empty()
-            || self.is_downloading {
+            || self.settings.auto_download_trigger_user_id.is_empty() {
             return;
         }
 
@@ -141,7 +140,7 @@ impl ReplayApp {
                     self.settings.auto_download_trigger_user_id);
             }
 
-            self.process_online_replay(&replay_id);
+            self.queue_download(&replay_id);
         }
     }
 
