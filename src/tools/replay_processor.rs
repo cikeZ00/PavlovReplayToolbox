@@ -836,11 +836,18 @@ pub fn download_replay_to_path(
     let events: EventsWrapper = if let Some(cached) = read_json_cached(&events_path)? {
         cached
     } else {
-        let events = get_json(
+        let events = match get_json(
             &client,
             &format!("{}/replay/{}/event?group=checkpoint", SERVER, replay_id),
             &retry,
-        )?;
+        ) {
+             Ok(events) => {
+            let _ = write_json_atomic(&events_path, &events);
+            events
+        }
+        Err(_) => EventsWrapper { events: Vec::new() }, // skip if fetching fails (Hacky workaround since Vankrupt's servers can be unreliable.)
+        
+        };
         let _ = write_json_atomic(&events_path, &events);
         events
     };
