@@ -1,10 +1,11 @@
-use std::fs;
 use std::path::Path;
 use std::process::exit;
 
 use reqwest::blocking::Client;
 
-use crate::tools::replay_processor::{MetaData, download_replay, API_BASE_URL};
+use crate::tools::replay_processor::{
+    download_replay_to_path, DownloadOptions, MetaData, API_BASE_URL,
+};
 
 pub struct CliArg {
     pub key: &'static str,
@@ -98,13 +99,6 @@ pub fn main_cli(replay_id: String, output_path: Option<String>, cfg: CliCfg) {
     };
 
     let result: Result<(), Box<dyn std::error::Error>> = (|| {
-        println!("Downloading replay '{}'...", &replay_id);
-
-        let replay_data = match download_replay(&replay_id, None) {
-            Ok(data) => data,
-            Err(e) => return Err(format!("Failed to download replay data: {}", e).into()),
-        };
-
         println!("Downloading metadata.");
 
         let metadata_result = match client
@@ -208,12 +202,26 @@ pub fn main_cli(replay_id: String, output_path: Option<String>, cfg: CliCfg) {
             None => download_dir.join(filename),
         };
 
-        println!("Saving to file to '{}'.", output_file.display());
+        println!("Downloading replay '{}'...", &replay_id);
 
-        match fs::write(output_file, replay_data) {
-            Ok(_) => {}
-            Err(e) => return Err(format!("Failed to save replay file: {}", e).into()),
-        }
+        let download_options = DownloadOptions {
+            use_disk_cache: true,
+            cache_dir: download_dir.join(".replay_cache"),
+            max_parallel_downloads: std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(4),
+        };
+
+        download_replay_to_path(
+            &replay_id,
+            download_options,
+            &output_file,
+            Some(metadata_result),
+            None,
+        )
+        .map_err(|e| format!("Failed to download replay data: {}", e))?;
+
+        println!("Saved replay to '{}'", output_file.display());
 
         println!("Replay saved successfully.");
 

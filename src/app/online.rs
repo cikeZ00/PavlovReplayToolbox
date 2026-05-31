@@ -2,7 +2,10 @@ use std::{fs, sync::Arc, thread};
 
 use reqwest::blocking::Client;
 
-use crate::tools::replay_processor::{download_replay, DownloadProgress, MetaData, API_BASE_URL};
+use crate::tools::replay_processor::{
+    download_replay, download_replay_to_path, DownloadOptions, DownloadProgress, MetaData,
+    API_BASE_URL,
+};
 
 use super::ReplayApp;
 
@@ -17,6 +20,11 @@ impl ReplayApp {
         let progress_clone = Arc::clone(&self.download_progress);
         let downloaded_tx = self.downloaded_tx.clone();
         let download_dir = self.settings.download_dir.clone();
+        let download_options = DownloadOptions {
+            use_disk_cache: self.settings.download_use_disk_cache,
+            cache_dir: self.settings.download_dir.join(".replay_cache"),
+            max_parallel_downloads: self.settings.download_thread_count,
+        };
 
         thread::spawn(move || {
             if let Ok(mut status) = status_clone.lock() {
@@ -50,11 +58,6 @@ impl ReplayApp {
             };
 
             let result: Result<(), Box<dyn std::error::Error>> = (|| {
-                let replay_data = match download_replay(&replay_id_clone, Some(download_progress_callback)) {
-                    Ok(data) => data,
-                    Err(e) => return Err(format!("Failed to download replay data: {}", e).into())
-                };
-
                 let update_build_progress = |current: usize, max: usize| {
                     if let Ok(mut progress) = progress_clone.lock() {
                         if let Some(p) = progress.as_mut() {
@@ -134,13 +137,30 @@ impl ReplayApp {
                 update_build_progress(75, 100);
 
                 let output_path = download_dir.join(filename);
-                update_build_progress(90, 100);
+                let use_disk_cache = download_options.use_disk_cache;
 
-                match fs::write(output_path, replay_data) {
-                    Ok(_) => {
-                        update_build_progress(100, 100);
-                    },
-                    Err(e) => return Err(format!("Failed to save replay file: {}", e).into())
+                if use_disk_cache {
+                    download_replay_to_path(
+                        &replay_id_clone,
+                        download_options,
+                        &output_path,
+                        Some(metadata_result.clone()),
+                        Some(download_progress_callback),
+                    )
+                    .map_err(|e| format!("Failed to download replay data: {}", e))?;
+                    update_build_progress(100, 100);
+                } else {
+                    let replay_data = download_replay(
+                        &replay_id_clone,
+                        download_options,
+                        Some(download_progress_callback),
+                    )
+                    .map_err(|e| format!("Failed to download replay data: {}", e))?;
+
+                    update_build_progress(90, 100);
+                    fs::write(output_path, replay_data)
+                        .map_err(|e| format!("Failed to save replay file: {}", e))?;
+                    update_build_progress(100, 100);
                 }
 
                 let _ = downloaded_tx.send(replay_id_clone);
